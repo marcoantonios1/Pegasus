@@ -16,6 +16,12 @@ func NewEntityStore(db *pgxpool.Pool) *EntityStore {
 }
 
 func (s *EntityStore) Create(ctx context.Context, e *Entity) error {
+	// metadata is NOT NULL DEFAULT '{}'::jsonb; a nil Go map encodes as SQL
+	// NULL rather than the JSON object the column requires, so normalize it.
+	if e.Metadata == nil {
+		e.Metadata = map[string]any{}
+	}
+
 	return s.db.QueryRow(ctx, `
 		INSERT INTO entities (type, canonical_name, is_self, metadata)
 		VALUES ($1, $2, $3, $4)
@@ -44,6 +50,10 @@ func (s *EntityStore) GetByID(ctx context.Context, id uuid.UUID) (*Entity, error
 }
 
 func (s *EntityStore) Update(ctx context.Context, e *Entity) error {
+	if e.Metadata == nil {
+		e.Metadata = map[string]any{}
+	}
+
 	return s.db.QueryRow(ctx, `
 		UPDATE entities
 		SET type = $1, canonical_name = $2, is_self = $3, metadata = $4, updated_at = now()
