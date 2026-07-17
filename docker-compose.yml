@@ -1,0 +1,62 @@
+services:
+  postgres:
+    # pgvector/pgvector:pg16 is postgres:16 with the `vector` extension
+    # preinstalled — migrations 000004/000005 CREATE EXTENSION vector and
+    # build an HNSW index, which plain postgres:16-alpine can't satisfy.
+    image: pgvector/pgvector:pg16
+    container_name: pegasus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pegasus
+      POSTGRES_USER: pegasus
+      POSTGRES_PASSWORD: pegasus
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pegasus -d pegasus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    container_name: pegasus-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations:/migrations
+    command:
+      [
+        "-path=/migrations",
+        "-database", "postgres://pegasus:pegasus@postgres:5432/pegasus?sslmode=disable",
+        "up"
+      ]
+    restart: "no"
+
+  # Daily pg_dump of the pegasus database, gzipped and written to a host
+  # bind mount (./backups) rather than the postgres_data named volume — a
+  # backup that lives in the same volume as the live data doesn't survive a
+  # volume-level failure. See README.md "Backups" for restore instructions.
+  backup:
+    image: postgres:16-alpine
+    container_name: pegasus-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: pegasus
+      PGPASSWORD: pegasus
+      PGDATABASE: pegasus
+      BACKUP_RETENTION_DAYS: "14"
+    volumes:
+      - ./scripts/backup.sh:/backup.sh:ro
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "/backup.sh"]
+
+volumes:
+  postgres_data:

@@ -36,6 +36,7 @@ pgdata/
 
 # Local data — exports, dumps, seeded test fixtures with real data
 /data/
+/backups/
 *.dump
 *.sql.gz
 *.wa-export/
