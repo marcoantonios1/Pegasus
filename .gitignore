@@ -1,0 +1,60 @@
+# Secrets and local config
+.env
+.env.*.local
+config.json
+config.local.yaml
+*.pem
+*.key
+credentials.json
+_smoke
+
+# Go build output
+bin/
+/pegasus
+*.exe
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Go module/workspace (only if you're not using workspaces on purpose)
+go.work
+go.work.sum
+
+# Vendored deps (omit this if you deliberately vendor)
+vendor/
+
+# Live-reload tooling (air, reflex, etc.)
+tmp/
+.air.toml.local
+
+# Docker
+docker-compose.override.yml
+.docker/
+pgdata/
+.pgdata/
+
+# Local data — exports, dumps, seeded test fixtures with real data
+/data/
+*.dump
+*.sql.gz
+*.wa-export/
+*.ig-export/
+
+# macOS
+.DS_Store
+
+# Windows (harmless to include even if you're macOS-only)
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code session data
+.claude/
