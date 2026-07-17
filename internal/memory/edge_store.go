@@ -16,6 +16,12 @@ func NewEdgeStore(db *pgxpool.Pool) *EdgeStore {
 }
 
 func (s *EdgeStore) Create(ctx context.Context, e *Edge) error {
+	// source_message_ids is NOT NULL DEFAULT '{}'; a nil Go slice encodes as
+	// SQL NULL rather than an empty array, so normalize it.
+	if e.SourceMessageIDs == nil {
+		e.SourceMessageIDs = []uuid.UUID{}
+	}
+
 	return s.db.QueryRow(ctx, `
 		INSERT INTO edges (
 			subject_id, predicate, object_id, object_literal, confidence,
@@ -67,6 +73,10 @@ func (s *EdgeStore) GetByID(ctx context.Context, id uuid.UUID) (*Edge, error) {
 }
 
 func (s *EdgeStore) Update(ctx context.Context, e *Edge) error {
+	if e.SourceMessageIDs == nil {
+		e.SourceMessageIDs = []uuid.UUID{}
+	}
+
 	_, err := s.db.Exec(ctx, `
 		UPDATE edges
 		SET

@@ -155,7 +155,20 @@ func main() {
 		fmt.Printf("xor constraint correctly rejected edge with neither object set: %v\n", err)
 	}
 
-	// Entity delete
+	// e2 is referenced by edge1.object_id; deleting it should fail on the FK,
+	// which is the correct, expected behavior (not a store bug).
+	if err := entityStore.Delete(ctx, e2.ID); err == nil {
+		log.Fatalf("expected FK violation deleting referenced entity, got none")
+	} else {
+		fmt.Printf("FK correctly blocked deleting entity still referenced by an edge: %v\n", err)
+	}
+
+	// Entity delete (e2, now unreferenced after edge1 is repointed to a literal)
+	edge1.ObjectID = nil
+	edge1.ObjectLiteral = strPtr("placeholder")
+	if err := edgeStore.Update(ctx, edge1); err != nil {
+		log.Fatalf("edge1 repoint update: %v", err)
+	}
 	if err := entityStore.Delete(ctx, e2.ID); err != nil {
 		log.Fatalf("entity2 delete: %v", err)
 	}
