@@ -84,8 +84,10 @@ confirm the disk/volume backing the `postgres_data` volume is encrypted:**
   it).
 - **macOS (FileVault):** confirm FileVault is enabled (`fdesetup status`).
 
-**Open question:** this depends on which machine actually runs the stack —
-a personal VPS vs. a local Mac have different answers here (VPS: needs LUKS
-set up explicitly at provision time; a Mac with FileVault already on: this
-is already satisfied, just confirm). Flagging rather than assuming — Marco
-to confirm the deployment target.
+**Resolved 2026-07-17:** deployment target is Marco's local Mac (not a VPS).
+`fdesetup status` confirms FileVault is On. Docker Desktop on macOS runs
+containers inside a lightweight Linux VM whose backing disk image is itself
+a file on this same FileVault-encrypted boot volume, so `postgres_data`'s
+on-disk bytes are covered without any extra setup. If the deployment target
+ever moves to a Linux VPS, this needs to be re-checked there (LUKS is not
+on by default on most VPS images) — the guidance above still applies.
