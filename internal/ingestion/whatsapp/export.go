@@ -58,6 +58,15 @@ var mediaOmittedType = map[string]string{
 // in the export bundle.
 var attachedFileRe = regexp.MustCompile(`^\x{200E}?(\S+\.(\w+))\s\(file attached\)$`)
 
+// genericOmittedRe catches omission markers this parser doesn't have a
+// Pegasus media type for ("sticker omitted", "GIF omitted", "Contact card
+// omitted", "document omitted", ...) so they get dropped instead of being
+// forwarded as literal text. Limited to 1-2 leading words specifically to
+// avoid misfiring on an ordinary sentence that happens to end in "omitted"
+// ("the meeting agenda item was omitted") — a real but rare false-positive
+// risk of line-based text matching, not worth over-engineering around here.
+var genericOmittedRe = regexp.MustCompile(`(?i)^[a-z]+(?: [a-z]+)? omitted$`)
+
 var attachedExtType = map[string]string{
 	"jpg": ingestion.MediaTypeImage, "jpeg": ingestion.MediaTypeImage, "png": ingestion.MediaTypeImage, "webp": ingestion.MediaTypeImage,
 	"mp4": ingestion.MediaTypeVideo, "mov": ingestion.MediaTypeVideo, "3gp": ingestion.MediaTypeVideo, "avi": ingestion.MediaTypeVideo,
@@ -184,6 +193,12 @@ func classifyExportBody(body string) (mediaType string, text, mediaURL *string, 
 	if mt, found := mediaOmittedType[strings.ToLower(trimmed)]; found {
 		// Type is known but the actual file isn't in a text-only export.
 		return mt, nil, nil, true
+	}
+
+	if genericOmittedRe.MatchString(trimmed) {
+		// An omission marker Pegasus has no media type for (sticker, GIF,
+		// contact card, document, ...) — drop rather than forward as text.
+		return "", nil, nil, false
 	}
 
 	if lines := strings.SplitN(body, "\n", 2); true {
