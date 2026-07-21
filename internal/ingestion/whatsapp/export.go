@@ -174,7 +174,7 @@ func (p *ExportParser) buildMessage(pm pendingMessage, conversationID string) (i
 
 	mediaType, text, mediaURL, ok := classifyExportBody(body)
 	if !ok {
-		p.logf("whatsapp export: dropping unsupported/unresolvable entry from %s at %s %s", pm.sender, pm.dateStr, pm.timeStr)
+		p.logf("whatsapp export: dropping unsupported/unresolvable entry from %s at %s %s: body=%q", pm.sender, pm.dateStr, pm.timeStr, body)
 		return ingestion.RawMessage{}, false
 	}
 
