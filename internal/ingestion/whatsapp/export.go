@@ -264,7 +264,7 @@ func parseExportTimestamp(dateStr, timeStr string) (time.Time, error) {
 
 	// Normalize NBSP/narrow-NBSP (see the ws const) to a plain space so the
 	// "3:04 PM" layouts below — which expect an ASCII space — still match.
-	timeStr = strings.NewReplacer(" ", " ", " ", " ").Replace(timeStr)
+	timeStr = strings.NewReplacer("\u00a0", " ", "\u202f", " ").Replace(timeStr)
 	timeStr = strings.TrimSpace(timeStr)
 	layouts := []string{"15:04:05", "15:04", "3:04:05 PM", "3:04 PM"}
 	var clock time.Time
