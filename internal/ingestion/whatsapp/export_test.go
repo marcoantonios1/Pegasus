@@ -142,3 +142,30 @@ func TestParseExport_AndroidStyleHeader(t *testing.T) {
 		t.Errorf("unexpected second message: %+v", msgs[1])
 	}
 }
+
+// TestParseExport_NarrowNoBreakSpaceBeforeAMPM regression-tests a real bug
+// found by running the parser against an actual WhatsApp export: recent
+// exports separate the time from its AM/PM marker with U+202F (narrow
+// no-break space), not a plain ASCII space. Go's regexp \s doesn't match
+// it, which used to swallow "pm"/"am" into the sender name and silently
+// drop it from the parsed time (misparsing PM timestamps as AM).
+func TestParseExport_NarrowNoBreakSpaceBeforeAMPM(t *testing.T) {
+	sample := "29/07/2024, 1:38 pm - Kevin Azzi: hello\n"
+
+	p := NewExportParser()
+	msgs, err := p.Parse(strings.NewReader(sample), "conv-nbsp")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
+	}
+
+	m := msgs[0]
+	if m.SenderExternalID != "Kevin Azzi" {
+		t.Errorf("expected sender %q, got %q (AM/PM marker leaked into sender name)", "Kevin Azzi", m.SenderExternalID)
+	}
+	if m.Timestamp.Hour() != 13 {
+		t.Errorf("expected 1:38pm to parse as hour 13, got hour %d (PM marker was dropped)", m.Timestamp.Hour())
+	}
+}
