@@ -33,15 +33,23 @@ import (
 //     that happens to contain a colon in its own text. Rare at personal
 //     scale; flagged here rather than silently accepted.
 
+// ws is the whitespace class used throughout these patterns instead of \s.
+// Go's regexp \s (RE2) is ASCII-only and does NOT match U+00A0 (NBSP) or
+// U+202F (narrow NBSP) — and recent WhatsApp exports (confirmed against a
+// real export) use U+202F between the time and its AM/PM marker. Missing
+// this silently swallowed "pm"/"am" into the sender name and dropped it
+// from the captured time, misparsing PM timestamps as AM.
+const ws = ` \x{00A0}\x{202F}`
+
 // headerRe matches a line that starts a new message: a timestamp, then a
 // "Sender:" prefix. Handles both the iOS style ("[D/M/Y, H:MM:SS AM] Name: ")
 // and the Android style ("D/M/Y, H:MM AM - Name: ").
-var headerRe = regexp.MustCompile(`^\x{200E}?\[?(\d{1,2}/\d{1,2}/\d{2,4}),\s?(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]?\s*[-\x{2013}]?\s*([^:\n]{1,60}?):\s(.*)$`)
+var headerRe = regexp.MustCompile(`^\x{200E}?\[?(\d{1,2}/\d{1,2}/\d{2,4}),[` + ws + `]?(\d{1,2}:\d{2}(?::\d{2})?(?:[` + ws + `]?[APap][Mm])?)\]?[` + ws + `]*[-\x{2013}]?[` + ws + `]*([^:\n]{1,60}?):[` + ws + `](.*)$`)
 
 // timestampRe matches a line that starts with a timestamp but has no
 // "Sender:" attribution — a system notification ("Messages and calls are
 // end-to-end encrypted...", "X added Y", etc.), not an actual message.
-var timestampRe = regexp.MustCompile(`^\x{200E}?\[?(\d{1,2}/\d{1,2}/\d{2,4}),\s?(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]?\s*[-\x{2013}]?\s`)
+var timestampRe = regexp.MustCompile(`^\x{200E}?\[?(\d{1,2}/\d{1,2}/\d{2,4}),[` + ws + `]?(\d{1,2}:\d{2}(?::\d{2})?(?:[` + ws + `]?[APap][Mm])?)\]?[` + ws + `]*[-\x{2013}]?[` + ws + `]`)
 
 // mediaOmittedType maps WhatsApp's type-specific omission markers (used in
 // exports "without media") to Pegasus's media types. Markers that don't map
@@ -254,6 +262,9 @@ func parseExportTimestamp(dateStr, timeStr string) (time.Time, error) {
 		year += 2000
 	}
 
+	// Normalize NBSP/narrow-NBSP (see the ws const) to a plain space so the
+	// "3:04 PM" layouts below — which expect an ASCII space — still match.
+	timeStr = strings.NewReplacer(" ", " ", " ", " ").Replace(timeStr)
 	timeStr = strings.TrimSpace(timeStr)
 	layouts := []string{"15:04:05", "15:04", "3:04:05 PM", "3:04 PM"}
 	var clock time.Time
