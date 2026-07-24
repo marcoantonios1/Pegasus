@@ -107,7 +107,10 @@ func (p *ExportParser) Parse(r io.Reader) ([]ingestion.RawMessage, error) {
 
 	conversationID := thread.ThreadPath
 	if conversationID == "" {
-		conversationID = thread.Title
+		// thread_path is an internal identifier (always ASCII), but title
+		// is a human-readable name and can carry the same mojibake bug as
+		// message content — only relevant on this fallback path.
+		conversationID = fixMojibake(thread.Title)
 	}
 
 	var out []ingestion.RawMessage
@@ -123,19 +126,26 @@ func (p *ExportParser) Parse(r io.Reader) ([]ingestion.RawMessage, error) {
 }
 
 func (p *ExportParser) buildMessage(m exportMessage, conversationID string) (ingestion.RawMessage, bool) {
+	// sender_name is a human-readable display name and carries the same
+	// mojibake bug as message content (confirmed against a real export —
+	// e.g. "Yasmine 🌸" came out as "Yasmine ð¸"). SenderExternalID feeds
+	// identity/entity resolution downstream, so this must be corrected
+	// here, not left for a caller to notice.
+	senderName := fixMojibake(m.SenderName)
+
 	mediaType, text, mediaURL, ok := classify(m)
 	if !ok {
-		p.logf("instagram export: dropping unsupported/unresolvable entry from %s at %d", m.SenderName, m.TimestampMs)
+		p.logf("instagram export: dropping unsupported/unresolvable entry from %s at %d", senderName, m.TimestampMs)
 		return ingestion.RawMessage{}, false
 	}
 
 	ts := time.UnixMilli(m.TimestampMs).UTC()
 
 	return ingestion.RawMessage{
-		ExternalID:       syntheticExternalID(conversationID, m.SenderName, ts, m.Content),
+		ExternalID:       syntheticExternalID(conversationID, senderName, ts, m.Content),
 		Platform:         "instagram",
 		ConversationID:   conversationID,
-		SenderExternalID: m.SenderName,
+		SenderExternalID: senderName,
 		Timestamp:        ts,
 		MediaType:        mediaType,
 		Text:             text,

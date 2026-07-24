@@ -256,3 +256,33 @@ func jsonQuote(s string) string {
 	}
 	return string(b)
 }
+
+// TestParseExport_MojibakeSenderName regression-tests a bug found by
+// running the parser against a real export: sender_name carries the same
+// mojibake bug as message content (a real contact's "Yasmine 🌸" came out
+// as "Yasmine ð¸" in SenderExternalID), but fixMojibake was only being
+// applied to content. SenderExternalID feeds identity/entity resolution
+// downstream, so a wrong value here silently breaks identity matching for
+// any contact with an emoji or accented character in their name.
+func TestParseExport_MojibakeSenderName(t *testing.T) {
+	const sample = `{
+		"thread_path": "inbox/yasmine_1234",
+		"messages": [
+			{"sender_name": "Yasmine ð¸", "timestamp_ms": 1735707600000, "content": "hi"}
+		]
+	}`
+
+	p := NewExportParser()
+	msgs, err := p.Parse(strings.NewReader(sample))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
+	}
+
+	want := "Yasmine \U0001F338"
+	if msgs[0].SenderExternalID != want {
+		t.Errorf("mojibake not corrected in sender name: want %q, got %q", want, msgs[0].SenderExternalID)
+	}
+}
