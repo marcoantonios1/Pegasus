@@ -1,6 +1,7 @@
 package instagram
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -187,4 +188,71 @@ func TestParseExport_UnknownConversationFallsBackToTitle(t *testing.T) {
 	if msgs[0].ConversationID != "Bugs" {
 		t.Errorf("expected fallback to title, got %q", msgs[0].ConversationID)
 	}
+}
+
+// TestParseExport_SystemGeneratedContentDropped regression-tests a bug
+// found by running the parser against a real Instagram export: reactions,
+// likes, unresolvable "sent an attachment" stubs, and ad-referral notes all
+// arrive as plain "content" text with no structured field marking them as
+// non-message events (confirmed by inspecting the raw JSON), so they were
+// being forwarded as ordinary text messages. These four samples are the
+// exact content strings seen in that real export.
+func TestParseExport_SystemGeneratedContentDropped(t *testing.T) {
+	cases := []string{
+		"Reacted \U0001F602 to your message ",
+		"Liked a message",
+		"You sent an attachment.",
+		"Yorgo sent an attachment.",
+		"You opened this chat through an ad. View ad(https://www.instagram.com/p/DVAbOgujHwl/)",
+	}
+
+	for _, content := range cases {
+		sample := `{"title": "t", "messages": [{"sender_name": "marco.antonios", "timestamp_ms": 1735707600000, "content": ` + jsonQuote(content) + `}]}`
+
+		p := NewExportParser()
+		var dropped bool
+		p.Logger = func(format string, args ...any) { dropped = true }
+
+		msgs, err := p.Parse(strings.NewReader(sample))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", content, err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("content %q: expected 0 messages (system-generated), got %+v", content, msgs)
+		}
+		if !dropped {
+			t.Errorf("content %q: expected a log line for the dropped entry", content)
+		}
+	}
+}
+
+// TestParseExport_AttachmentWithShareIsAlreadyDropped documents that a
+// "sent an attachment." content string accompanied by a populated "share"
+// field is dropped by the Share != nil case, before systemContentRe is even
+// consulted — verified against a real export where 302 of these carried a
+// share object and 42 did not.
+func TestParseExport_AttachmentWithShareIsAlreadyDropped(t *testing.T) {
+	const sample = `{
+		"title": "t",
+		"messages": [
+			{"sender_name": "marco.antonios", "timestamp_ms": 1735707600000, "content": "You sent an attachment.", "share": {"link": "https://instagram.com/reel/xyz", "share_text": ""}}
+		]
+	}`
+
+	p := NewExportParser()
+	msgs, err := p.Parse(strings.NewReader(sample))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected share-backed attachment to be dropped, got %+v", msgs)
+	}
+}
+
+func jsonQuote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
