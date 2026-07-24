@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"time"
 	"unicode/utf8"
 
@@ -65,6 +66,18 @@ type exportReaction struct {
 	Reaction string `json:"reaction"`
 	Actor    string `json:"actor"`
 }
+
+// systemContentRe matches Instagram-generated placeholder strings that
+// appear as ordinary "content" text in the export but aren't actually
+// user-authored messages: reactions, likes, an unresolvable attachment
+// reference with no other data attached, and the "opened via ad" referral
+// note. Confirmed against a real export (checked the raw JSON directly) —
+// none of these carry any structured field distinguishing them from real
+// text, so, like WhatsApp's system-notification detection, this is
+// necessarily an English-locale text-pattern match with the same small
+// false-positive risk (a real message that happens to read exactly
+// "Liked a message", for instance).
+var systemContentRe = regexp.MustCompile(`(?s)^(Reacted .+ to your message\s*|Liked a message|.+ sent an attachment\.|You opened this chat through an ad\..*)$`)
 
 // ExportParser parses one Instagram DM export thread (one JSON file) into
 // RawMessage values. Mirrors whatsapp.ExportParser: no classification or
@@ -134,7 +147,10 @@ func (p *ExportParser) buildMessage(m exportMessage, conversationID string) (ing
 // Mirrors whatsapp.classify()'s shape: dispatch on which field is
 // populated, known shapes map cleanly, anything ambiguous or unsupported
 // (shared posts/reels, story replies, unsend markers, reaction-only
-// entries) is reported via ok=false instead of guessed at.
+// entries, and — confirmed against a real export — reactions/likes/
+// unresolvable-attachment stubs/ad-referral notes that Instagram renders as
+// plain content text with no structured field of their own, see
+// systemContentRe) is reported via ok=false instead of guessed at.
 func classify(m exportMessage) (mediaType string, text, mediaURL *string, ok bool) {
 	switch {
 	case m.IsUnsent:
@@ -155,6 +171,11 @@ func classify(m exportMessage) (mediaType string, text, mediaURL *string, ok boo
 
 	case m.Content == "" && len(m.Reactions) > 0:
 		// A reaction to another message, not a message itself.
+		return "", nil, nil, false
+
+	case m.Content != "" && systemContentRe.MatchString(m.Content):
+		// A reaction, a like, an unresolvable "sent an attachment" stub, or
+		// an ad-referral note — none of these are user-authored content.
 		return "", nil, nil, false
 
 	case m.Content != "":
