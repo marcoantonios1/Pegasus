@@ -17,6 +17,16 @@ package extraction
 // traceable, alongside git history for the actual diff.
 const VocabularyVersion = 1
 
+// Named constants for the three event predicates — referenced both in the
+// Predicates slice below and by EffectivePredicate (event_tense.go), so the
+// read-time event_future→event_past rule can never drift out of sync with
+// the vocabulary's actual predicate name strings.
+const (
+	PredicateEventPast    = "event_past"
+	PredicateEventPresent = "event_present"
+	PredicateEventFuture  = "event_future"
+)
+
 // Predicate is one entry in the closed vocabulary. Description is injected
 // into the extraction prompt (so the model knows what each predicate
 // means, not just its name) and doubles as documentation here.
@@ -52,9 +62,9 @@ var Predicates = []Predicate{
 	// conversation on windows where the actual content was untranslatable
 	// slang it couldn't process — described abstractly instead so there's
 	// nothing concrete for the model to regurgitate.
-	{Name: "event_past", Category: "events", Description: "subject did or experienced object at a specific point already in the past — a completed action, not an ongoing state"},
-	{Name: "event_present", Category: "events", Description: "subject is currently in, doing, or experiencing object — an ongoing state, not a one-time completed action or a future plan"},
-	{Name: "event_future", Category: "events", Description: "subject has stated a plan or intention to do or experience object at a future point — has not happened yet"},
+	{Name: PredicateEventPast, Category: "events", Description: "subject did or experienced object at a specific point already in the past — a completed action, not an ongoing state"},
+	{Name: PredicateEventPresent, Category: "events", Description: "subject is currently in, doing, or experiencing object — an ongoing state, not a one-time completed action or a future plan"},
+	{Name: PredicateEventFuture, Category: "events", Description: "subject has stated a plan or intention to do or experience object at a future point — has not happened yet"},
 
 	// Work / education
 	{Name: "works_at", Category: "work_education", Description: "subject is employed at object (an organization)"},
