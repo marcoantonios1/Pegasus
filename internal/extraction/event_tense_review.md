@@ -99,11 +99,74 @@ statement, and nothing currently tells the model which to prefer when
 both fit. Not a tense-classification bug — a predicate-selection
 ambiguity between two already-valid predicates.
 
+## Follow-up: validation against real messages, not hand-written phrasing
+
+Everything above used realistic phrasing I wrote myself. Marco asked,
+correctly, whether that's actually the same bar as the earlier
+`extraction_review.md` work — it isn't, so this follow-up pulls genuine
+examples out of the real "Bugs" WhatsApp export instead (parsed via the
+real `whatsapp.ExportParser`, real timestamps, real text, nothing
+hand-written):
+
+- **Real past** — Charbel's gym/lockers complaint (07/08/2024, already
+  seen in `extraction_review.md`): `event_past` ✓
+- **Real future** — a real recruiter message Marco forwarded/quoted,
+  "Softimpact would like to schedule an *on site interview* with you
+  tomorrow at 11am" (05/11/2024): `event_future` ✓ (correctly attributed
+  to `Softimpact` as subject, not `Marco`, since Softimpact is the one
+  doing the scheduling)
+- **Real future, code-switched** — "Balachet bel deployment w mafroud next
+  week balich a3moul meeting ma3 el mata3im" (30/10/2024): `event_future`
+  ✓ — tense held up correctly even on code-switched Arabizi, though see
+  the object-quality note below.
+- **Real present** — Marco's own real email about his actual "Dolfins"
+  project (02/01/2025, a genuine AWS billing complaint) — no single
+  strong expectation here (see why below), but informative regardless.
+
+All three tense-scored real cases came out correct. Two new findings from
+the real content specifically (not visible in the hand-written phrasing
+above):
+
+**Confirms the `works_at`/`building` vs. `event_present` overlap, now on
+real data.** The Dolfins email produced `works_at → Dolfins`, `role_is →
+"startup project leader"`, and `Dolfins -- building --> "social network
+with integrated restaurant reservation and event ticketing features"` —
+but never `event_present` for the core "I am currently working on
+Dolfins" statement. This is the same pattern flagged above with "still
+working at Costguard," now independently reproduced on a real message
+about a real project. Worth taking seriously for v2: specific predicates
+reliably beat the generic `event_present` when both apply, which may
+mean `event_present` is rarely going to be selected in practice for
+employment/project-status statements — worth deciding whether that's
+fine (the more specific predicate usually is the better answer) or worth
+tightening.
+
+**A likely misdirected `building` edge**: `building`'s description says
+*subject* is building *object*, a project — modeled on "Marco -- building
+--> Dolfins" (subject=person, object=project), matching the proposal's
+own §6.4 example. Here the model produced `Dolfins -- building -->
+"social network..."` instead — Dolfins (the project) as *subject*, its
+own description as *object*. That's a different relationship than the
+predicate was designed for (more like "Dolfins is/does X" than "someone
+is building Dolfins"). Not caught by `ValidateTriples` because both
+subject and object are non-empty strings and the predicate itself is
+valid — this is a direction/semantics issue, not a shape issue, so the
+current validation layer can't catch it. Worth a v2 fix to `building`'s
+description clarifying which side must be the person.
+
+**Object quality remains weak on untranslated slang even when tense is
+right**: the code-switched future example extracted the *entire* raw
+Arabizi sentence verbatim as the object, not a cleaned-up description —
+correct predicate, low-value object. Same category as the "said 'X'"
+finding in `extraction_review.md`, now confirmed for the future-tense
+case specifically, not just past-tense.
+
 ## Summary for follow-up
 
 1. Requirement 1's core concern (historical backlog + relative date
-   phrasing) is validated working correctly — this was the highest-risk
-   part of this issue and it passed.
+   phrasing) is validated working correctly on both hand-written *and*
+   real messages — this was the highest-risk part of this issue and it
+   passed both times.
 2. The ambiguous-tense fallback (requirement 2) is real in the prompt but
    not reliably followed by the model — flagged as an open gap, not
    force-fixed against a single example.
@@ -111,4 +174,11 @@ ambiguity between two already-valid predicates.
    before being treated as a finding — one miss out of one run was noise
    here, not a bug.
 4. New vocabulary v2 candidate: clarify precedence between `works_at` /
-   `role_is` and `event_present` for ongoing-employment statements.
+   `role_is` and `event_present` for ongoing-employment statements —
+   now confirmed on both hand-written and real data.
+5. New vocabulary v2 candidate: tighten `building`'s description —
+   observed the model reversing subject/object direction on a real
+   message.
+6. Object quality on untranslated code-switched content is weak
+   regardless of predicate/tense correctness — a pre-existing, separate
+   finding, now confirmed to affect event_future too, not just event_past.
