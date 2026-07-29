@@ -12,6 +12,15 @@ import (
 // list (§8.1) is injected so the model has no room to invent predicates —
 // ValidateTriples (parse.go) is the actual enforcement, this is the
 // request.
+//
+// An explicit instruction against extracting "subject said 'X'" tautologies
+// on unparseable slang was tried and reverted after validating against a
+// real message sample: it didn't fix the target failure (the model still
+// produced "said 'X'" triples on Arabizi content it couldn't interpret) and
+// it regressed a different window from a correct [] to hallucinated noise.
+// Net effect was unclear-to-negative, so it's not here — see
+// extraction_review.md for the full before/after comparison. Worth
+// revisiting with a different approach, not with this same instruction.
 const promptTemplateText = `Given this conversation snippet (with speaker labels and timestamps), extract factual, preference, and event triples about the people in it.
 
 Allowed predicates — use ONLY these exact values for "predicate", never invent others:
