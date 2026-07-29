@@ -17,6 +17,16 @@ package extraction
 // traceable, alongside git history for the actual diff.
 const VocabularyVersion = 1
 
+// Named constants for the three event predicates — referenced both in the
+// Predicates slice below and by EffectivePredicate (event_tense.go), so the
+// read-time event_future→event_past rule can never drift out of sync with
+// the vocabulary's actual predicate name strings.
+const (
+	PredicateEventPast    = "event_past"
+	PredicateEventPresent = "event_present"
+	PredicateEventFuture  = "event_future"
+)
+
 // Predicate is one entry in the closed vocabulary. Description is injected
 // into the extraction prompt (so the model knows what each predicate
 // means, not just its name) and doubles as documentation here.
