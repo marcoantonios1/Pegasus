@@ -184,3 +184,29 @@ anyone trying to diff/test against exact extraction output later.
    §8.3's own acknowledged tradeoff of non-overlapping windows.
 6. `object_type` needs tightening before anything downstream trusts the
    entity/literal distinction.
+
+## Addendum — findings from the bulk-import validation pass
+
+Running the same real chat through the new `internal/bulkimport`
+orchestration (a different, earlier 107-message slice of the same export,
+14 windows) surfaced two more data points worth folding into v2 planning:
+
+- **`inside_joke_ref`'s earlier fix (finding 2) traded one problem for
+  another**: the object is no longer a verbatim quote, but it's now
+  frequently too generic to be useful — e.g. `Charbel Akl --
+  inside_joke_ref --> "shared laughter and joking"`. That description
+  can't distinguish this joke from any other joke in the same
+  conversation, so it's not obviously more useful for future retrieval
+  than the quote it replaced. `inside_joke_ref` likely needs a stronger
+  prompt example of what a *good* object looks like, not just an
+  instruction about what to avoid — worth a dedicated small validation
+  pass once there's a clearer candidate description to test.
+- **A likely `nickname_is` false positive**: `Marco -- nickname_is -->
+  "Awie"` — "Awie" is a Lebanese Arabic interjection (roughly "yeah" /
+  "really") in the source message, not a nickname reveal. Unlike the
+  Rome/Italy case, this doesn't look like example-echoing — it looks like
+  a genuine misread of Arabizi content as a self-identification. Same root
+  cause category as finding 3 (the model's handling of Arabizi is weaker
+  than English), different predicate. Not fixed here — noted as another
+  data point that this specific code-switched slang is a systematic weak
+  spot for this model, not a one-off.
