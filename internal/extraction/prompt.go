@@ -21,6 +21,22 @@ import (
 // Net effect was unclear-to-negative, so it's not here — see
 // extraction_review.md for the full before/after comparison. Worth
 // revisiting with a different approach, not with this same instruction.
+//
+// Event tense classification (proposal §8.5, event_past/present/future):
+//   - Classified relative to the mentioning MESSAGE's own timestamp, not
+//     to whenever extraction happens to run. This matters specifically for
+//     historical backlog import: a message from two years ago saying "next
+//     week" must come out event_future (relative to when it was said), not
+//     event_past just because two years have since elapsed in the real
+//     world. Getting this wrong at extraction time can't be fixed later by
+//     the read-time event_future→event_past rule (EffectivePredicate) —
+//     that rule only ever moves event_future forward into event_past based
+//     on elapsed time, it doesn't correct a tense that was misclassified
+//     backward in the first place.
+//   - Ambiguous/unclear tense defaults to event_present, never a guessed
+//     event_past or event_future — event_present carries no hard-expiry
+//     read-time behavior, so a wrong guess here is the least harmful of
+//     the three.
 const promptTemplateText = `Given this conversation snippet (with speaker labels and timestamps), extract factual, preference, and event triples about the people in it.
 
 Allowed predicates — use ONLY these exact values for "predicate", never invent others:
@@ -34,6 +50,10 @@ Output ONLY a JSON array, no prose, no markdown code fences, no explanation befo
 
 "predicate" must be exactly one of the allowed predicate names listed above.
 "object_type" is "entity" if object refers to a person/place/thing that could itself be a subject elsewhere, "literal" for a plain value (a food, a city name used only as a value, a nickname string, etc.).
+
+For event_past / event_present / event_future specifically: classify the tense relative to the TIMESTAMP OF THE MESSAGE that mentions the event, not relative to today's date. A message timestamped two years ago saying "next week" describes an event_future relative to that message's own timestamp — it happened in the past from today's perspective, but it was a future plan at the moment it was said, and that is what determines the predicate. Do not use today's date to decide event tense.
+If an event's tense is genuinely unclear or ambiguous from the phrasing, use event_present rather than guessing event_past or event_future — event_present is the safest default since it does not trigger a hard-expiry rule the way a wrongly-guessed event_future would.
+
 If nothing is extractable from this conversation snippet, output exactly: []
 `
 
