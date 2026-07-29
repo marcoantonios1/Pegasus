@@ -43,9 +43,18 @@ var Predicates = []Predicate{
 	// not a design choice made in this package. Different default decay
 	// behavior per variant is handled elsewhere (confidence decay, a
 	// separate issue) — extraction only needs to pick the right variant.
-	{Name: "event_past", Category: "events", Description: "subject did or experienced object in the past (e.g. \"went to Rome\")"},
-	{Name: "event_present", Category: "events", Description: "subject is currently in/doing object, an ongoing state (e.g. \"lives in Beirut\")"},
-	{Name: "event_future", Category: "events", Description: "subject plans to do or experience object (e.g. \"going to Italy next week\")"},
+	//
+	// Descriptions deliberately avoid a concrete quoted "e.g." example
+	// (earlier drafts used "went to Rome" / "lives in Beirut" / "going to
+	// Italy next week", lifted from proposal §8.5's own illustration).
+	// Validating against a real message sample caught qwen3-coder:30b
+	// echoing those exact phrases back as if extracted from the
+	// conversation on windows where the actual content was untranslatable
+	// slang it couldn't process — described abstractly instead so there's
+	// nothing concrete for the model to regurgitate.
+	{Name: "event_past", Category: "events", Description: "subject did or experienced object at a specific point already in the past — a completed action, not an ongoing state"},
+	{Name: "event_present", Category: "events", Description: "subject is currently in, doing, or experiencing object — an ongoing state, not a one-time completed action or a future plan"},
+	{Name: "event_future", Category: "events", Description: "subject has stated a plan or intention to do or experience object at a future point — has not happened yet"},
 
 	// Work / education
 	{Name: "works_at", Category: "work_education", Description: "subject is employed at object (an organization)"},
@@ -65,7 +74,13 @@ var Predicates = []Predicate{
 	{Name: "nickname_is", Category: "people", Description: "subject's nickname is object, a literal string"},
 
 	// Shared context
-	{Name: "inside_joke_ref", Category: "shared_context", Description: "subject and object share an inside joke or recurring reference"},
+	//
+	// Description below was tightened after validating against a real
+	// sample: the model initially used object to hold a verbatim quoted
+	// snippet of the triggering message rather than a short description of
+	// what the joke/reference is about — result was noisy, not reusable
+	// across future mentions of the same joke.
+	{Name: "inside_joke_ref", Category: "shared_context", Description: "subject and object share a recurring inside joke or reference; object is a short description of what the joke is about, not a quoted snippet of the message"},
 }
 
 var predicateNames = func() map[string]bool {
