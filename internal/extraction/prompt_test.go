@@ -57,3 +57,20 @@ func TestBuildPrompt_EmptyWindowStillProducesValidPrompt(t *testing.T) {
 		t.Error("expected prompt to instruct [] for nothing extractable")
 	}
 }
+
+func TestBuildPrompt_ContainsEventTenseInstructions(t *testing.T) {
+	prompt, err := BuildPrompt(Window{}, Predicates)
+	if err != nil {
+		t.Fatalf("BuildPrompt: %v", err)
+	}
+
+	if !strings.Contains(prompt, "relative to the TIMESTAMP OF THE MESSAGE") {
+		t.Error("expected prompt to instruct tense classification relative to message timestamp, not today's date (§8.5, historical import correctness)")
+	}
+	if !strings.Contains(prompt, "not relative to today's date") {
+		t.Error("expected prompt to explicitly rule out using today's date for tense classification")
+	}
+	if !strings.Contains(prompt, "use event_present rather than guessing") {
+		t.Error("expected prompt to state the ambiguous-tense fallback rule explicitly")
+	}
+}
