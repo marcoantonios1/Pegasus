@@ -22,8 +22,8 @@ func TestIsValidPredicate(t *testing.T) {
 		{"pet_of", true},
 		{"nickname_is", true},
 		{"inside_joke_ref", true},
-		{"hates", false},        // synonym of dislikes — exactly what closing the vocab prevents
-		{"has_event", false},    // the pre-split generic predicate §8.5 replaced
+		{"hates", false},     // synonym of dislikes — exactly what closing the vocab prevents
+		{"has_event", false}, // the pre-split generic predicate §8.5 replaced
 		{"", false},
 		{"LIKES", false}, // case-sensitive: not a normalization layer
 	}
