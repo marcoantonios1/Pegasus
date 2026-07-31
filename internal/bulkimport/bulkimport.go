@@ -29,6 +29,17 @@ type WindowExtractor interface {
 // resolve triples to edges) without this package accumulating years of
 // history in memory. Mirrors ingestion.Sink's shape. May be nil if the
 // caller only cares about the returned Result's counts.
+//
+// Integration point (not yet wired, no call site exists for it today):
+// whatever eventually turns an ExtractedTriple into a memory.Edge and
+// calls EdgeStore.Create() MUST compute that edge's Confidence via
+// memory.ApplySourceWeight(triple.Confidence, sourceType) first — per
+// proposal §7.5, the stored Confidence column has to already be
+// extracted_confidence * source_weight, not the raw model-reported value.
+// This package doesn't do that resolution itself (entity resolution and
+// edge writing are out of scope here, same as the earlier bulk-import and
+// extraction issues), so there's deliberately no call to
+// ApplySourceWeight in this file yet — this comment is that TODO.
 type TripleSink func(conversationID string, window extraction.Window, triples []extraction.ExtractedTriple) error
 
 // ConversationResult summarizes processing for one conversation.
