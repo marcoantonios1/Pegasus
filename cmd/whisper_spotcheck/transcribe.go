@@ -204,7 +204,20 @@ func transcribeFile(client *http.Client, baseURL, path, model, agent string) (*t
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
-	part, err := mw.CreateFormFile("file", filepath.Base(path))
+	// OpenAI's real API rejects the .opus extension outright — verified
+	// live: identical Ogg-Opus byte content is accepted under .ogg and
+	// rejected under .opus with "Invalid file format" ('oga'/'ogg' are on
+	// OpenAI's allow-list, 'opus' isn't). WhatsApp's raw voice note files
+	// use .opus. Without this rename, every WhatsApp voice note sent to
+	// OpenAI — including via §5's real escalation path, not just this
+	// harness — would fail outright. The bytes are untouched; only the
+	// filename in the multipart part changes.
+	filename := filepath.Base(path)
+	if strings.EqualFold(filepath.Ext(filename), ".opus") {
+		filename = strings.TrimSuffix(filename, filepath.Ext(filename)) + ".ogg"
+	}
+
+	part, err := mw.CreateFormFile("file", filename)
 	if err != nil {
 		return nil, fmt.Errorf("create form file: %w", err)
 	}
