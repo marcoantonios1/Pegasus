@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -16,14 +18,25 @@ func NewEdgeStore(db *pgxpool.Pool) *EdgeStore {
 	return &EdgeStore{db: db}
 }
 
-func (s *EdgeStore) Create(ctx context.Context, e *Edge) error {
+// queryer is the subset of *pgxpool.Pool and pgxpool.Tx this package
+// needs. Both satisfy it with identical method signatures, so the same
+// SQL-executing helper can run either directly against the pool or inside
+// an explicit transaction — see insertEdge, used by both Create (against
+// s.db) and CorrectMemory (against a transaction, correct_memory.go), so
+// the INSERT itself is defined once, not duplicated between them.
+type queryer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func insertEdge(ctx context.Context, q queryer, e *Edge) error {
 	// source_message_ids is NOT NULL DEFAULT '{}'; a nil Go slice encodes as
 	// SQL NULL rather than an empty array, so normalize it.
 	if e.SourceMessageIDs == nil {
 		e.SourceMessageIDs = []uuid.UUID{}
 	}
 
-	return s.db.QueryRow(ctx, `
+	return q.QueryRow(ctx, `
 		INSERT INTO edges (
 			subject_id, predicate, object_id, object_literal, confidence,
 			importance, source_type, source_weight, source_message_ids,
@@ -47,6 +60,10 @@ func (s *EdgeStore) Create(ctx context.Context, e *Edge) error {
 		e.SupersededBy,
 		e.IsCorrection,
 	).Scan(&e.ID, &e.FirstSeen, &e.LastReinforced)
+}
+
+func (s *EdgeStore) Create(ctx context.Context, e *Edge) error {
+	return insertEdge(ctx, s.db, e)
 }
 
 func (s *EdgeStore) GetByID(ctx context.Context, id uuid.UUID) (*Edge, error) {
