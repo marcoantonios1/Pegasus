@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -317,5 +316,3 @@ func TestCorrectMemory_NonexistentOldEdgeErrors(t *testing.T) {
 		t.Errorf("expected ErrEdgeNotFound, got %v", err)
 	}
 }
-
-var _ = time.Now // keep time imported if future edits trim other uses
