@@ -55,7 +55,7 @@ func newTestTrigger(clock *fakeClock, onConsolidate func(ctx context.Context)) *
 
 // TestTrigger_IdleThresholdCrossed_CallsConsolidateOnce covers requirement 12.
 func TestTrigger_IdleThresholdCrossed_CallsConsolidateOnce(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	var calls int32
 	called := make(chan struct{}, 10)
 
@@ -80,7 +80,7 @@ func TestTrigger_IdleThresholdCrossed_CallsConsolidateOnce(t *testing.T) {
 
 // TestTrigger_ActivityBeforeThreshold_Debounces covers requirement 13.
 func TestTrigger_ActivityBeforeThreshold_Debounces(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	var calls int32
 
 	trig := newTestTrigger(clock, func(ctx context.Context) {
@@ -112,7 +112,7 @@ func TestTrigger_ActivityBeforeThreshold_Debounces(t *testing.T) {
 // re-trigger a new pass on every poll tick for as long as the idle period
 // continues, not once per idle period.
 func TestTrigger_DoesNotRefireWhileIdlePersists(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	var calls int32
 	called := make(chan struct{}, 10)
 
@@ -138,7 +138,7 @@ func TestTrigger_DoesNotRefireWhileIdlePersists(t *testing.T) {
 
 // TestTrigger_ActivityDuringPass_CancelsContext covers requirement 14.
 func TestTrigger_ActivityDuringPass_CancelsContext(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	started := make(chan struct{})
 	finished := make(chan struct{})
 	var mu sync.Mutex
@@ -173,7 +173,7 @@ func TestTrigger_ActivityDuringPass_CancelsContext(t *testing.T) {
 
 // TestTrigger_MaxIntervalFallback_FiresIndependently covers requirement 15.
 func TestTrigger_MaxIntervalFallback_FiresIndependently(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	called := make(chan struct{}, 10)
 
 	trig := newTestTrigger(clock, func(ctx context.Context) {
@@ -199,7 +199,7 @@ func TestTrigger_MaxIntervalFallback_FiresIndependently(t *testing.T) {
 // TestTrigger_ConcurrentRecordActivity_NoRace covers requirement 16 — run
 // with `go test -race`.
 func TestTrigger_ConcurrentRecordActivity_NoRace(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 
 	trig := newTestTrigger(clock, func(ctx context.Context) {
 		<-ctx.Done()
@@ -245,7 +245,7 @@ func (l *testLogger) has(event string) bool {
 
 // TestTrigger_LogsStateTransitions covers requirement 10.
 func TestTrigger_LogsStateTransitions(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	clock := newFakeClock(time.Now())
 	started := make(chan struct{})
 
 	trig := newTestTrigger(clock, func(ctx context.Context) {
