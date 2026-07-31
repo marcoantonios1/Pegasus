@@ -40,7 +40,7 @@ var ErrEdgeAlreadySuperseded = errors.New("memory: cannot correct an edge that h
 type CorrectionInput struct {
 	SubjectID        uuid.UUID
 	Predicate        string
-	ObjectID         *uuid.UUID  // exactly one of ObjectID/ObjectLiteral, same XOR rule as any edge
+	ObjectID         *uuid.UUID // exactly one of ObjectID/ObjectLiteral, same XOR rule as any edge
 	ObjectLiteral    *string
 	SourceMessageIDs []uuid.UUID // the message(s) where Marco issued the correction
 
