@@ -19,7 +19,7 @@ import (
 // audioExtensions is deliberately permissive — voice notes arrive in
 // whatever format WhatsApp/the phone produced (commonly .ogg/.opus/.m4a).
 var audioExtensions = map[string]bool{
-	".ogg": true, ".opus": true, ".m4a": true, ".mp3": true,
+	".ogg": true, ".opus": true, ".m4a": true, ".mp3": true, ".mp4": true,
 	".wav": true, ".aac": true, ".flac": true, ".aiff": true, ".caf": true,
 }
 
