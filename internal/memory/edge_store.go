@@ -18,7 +18,7 @@ func NewEdgeStore(db *pgxpool.Pool) *EdgeStore {
 	return &EdgeStore{db: db}
 }
 
-// queryer is the subset of *pgxpool.Pool and pgxpool.Tx this package
+// queryer is the subset of *pgxpool.Pool and pgx.Tx this package
 // needs. Both satisfy it with identical method signatures, so the same
 // SQL-executing helper can run either directly against the pool or inside
 // an explicit transaction — see insertEdge, used by both Create (against
