@@ -91,27 +91,108 @@ worth knowing if bulk historical import gets built against this same local
 instance: back off and retry on the first call after any idle period,
 don't treat a single 502 as a hard failure.
 
-## What's genuinely NOT done yet
+## Analysis of Marco's ratings (requirement 6)
 
-- **The accuracy judgment itself** (`review.md`'s rating columns are
-  blank, by design).
-- **Error rate / code-switch-boundary clustering analysis** (requirement
-  6) — blocked on Marco's ratings existing. Also blocked on knowing which
-  rating scale he actually used (asked, not assumed) before the numbers
-  can be interpreted correctly.
-- **The go/no-go decision on local-only sufficiency** (requirement 6) —
-  depends on whether local's `avg_logprob`/`no_speech_prob` actually
-  correlates with the manual ratings once they exist. Not evaluated yet;
-  there's real reason to expect it might not correlate well specifically
-  on code-switched content (a model can be confidently wrong), but that's
-  a hypothesis to check against real ratings, not a conclusion.
+**Rating scale used**: a single 0-100% accuracy estimate per file, filled
+in by Marco in `review.md`. Confirmed with Marco this represents both
+engines together except where a note overrides it — one file
+(`4171339089673893.ogg`) has an explicit split ("0% for local" vs. the
+90% listed, which is OpenAI's). 21 of 22 files were rated;
+`984286304369025.ogg` was left blank and is excluded from the numbers
+below rather than guessed at.
 
-## How to finish this
+**Aggregate**: mean 92.5%, median 100%, min 0%. 15 of 21 files rated a
+perfect 100% — every English-dominant file among them. All 6 files rated
+below 100% involve Arabic, either alone or code-switched with English.
+This part matches the proposal's underlying instinct: non-English content
+is where the risk concentrates, and English transcription is essentially
+solved by both engines already.
 
-1. Open `review.md`, fill in the "Manual accuracy rating" and "Code-switch
-   boundary error?" columns by ear for all 22 files, note which rating
-   scale was used.
-2. Tell Claude the ratings are ready — the aggregate analysis (error rate,
-   code-switch clustering, confidence correlation, the go/no-go
-   recommendation) gets built as a follow-up once there's real annotated
-   data to compute it from, not before.
+### Does errors cluster on code-switch boundaries specifically? Mixed — not cleanly.
+
+Went through the 4 lowest-rated files directly (this part is Claude's
+reading of the transcripts, not Marco's per-file judgment — the
+"Code-switch boundary error?" column in `review.md` was left blank):
+
+- **`4171339089673893.ogg` (0%)** — local completely misidentified the
+  language as Yiddish and produced garbage in Hebrew script on a short
+  (6.2s) clip; OpenAI correctly identified Arabic. **Not a code-switch
+  error** — there's no English in this clip at all. A language-ID
+  robustness failure on short/ambiguous audio.
+- **`1569244804590020.ogg` (70%)** — both engines produced pure Arabic,
+  zero English, with real word-level errors. **Not a code-switch error**
+  — general Arabic transcription accuracy.
+- **`1381303107441089.ogg` (85%)** — genuinely code-switch-related:
+  OpenAI renders "bad news"/"BID" in Latin script; local transliterates
+  the same words phonetically into Arabic script instead. A real
+  divergence in how the two engines *handle* a switch, not obviously a
+  clear-cut "one is right, one is wrong" case without hearing the audio.
+- **`1026963569878900.ogg` (90%)** — the translation issue Marco flagged
+  directly, at a heavily code-switched sentence.
+
+**Conclusion**: only 2 of the 4 worst files are actually code-switch
+related. General Arabic accuracy and language-ID robustness on short
+clips are independent, comparably-sized risk factors — an escalation
+design that only watches for code-switching specifically would miss the
+other two failure modes entirely.
+
+### Does local confidence predict accuracy? Weakly — not reliably enough on its own.
+
+Pearson correlation between Marco's ratings and local's own confidence
+signals (n=21, `4171339089673893.ogg` scored using its local=0%
+override):
+
+- rating vs. local `avg_logprob`: **r = 0.547** (moderate positive —
+  right direction, not strong)
+- rating vs. local `no_speech_prob`: **r = 0.172** (essentially no
+  signal)
+
+More important than the coefficient: **local confidence completely
+missed the single worst failure.** `4171339089673893.ogg` (0%, total
+language misidentification) had `avg_logprob = -0.483` — only the
+3rd-worst value in the whole set, not flagged as the most alarming.
+Meanwhile `997737946584480.mp4` (rated 100%) had a *worse*
+`avg_logprob` (-0.409) than several files rated below it. This is exactly
+the risk named in requirement 6 as a hypothesis to check, not assume: **a
+model can be confidently wrong, and this run proves it actually happens**
+— the worst mistake wasn't the least confident one.
+
+### The decision: is local-only sufficient, or does the escalation trigger need rethinking?
+
+**Rethinking needed — local-only as currently specified (escalate on low
+`avg_logprob` alone) is not trustworthy enough for Arabic/code-switched
+content, though it's fine for English.** Reasoning:
+
+1. English content is effectively solved locally — 100% across every
+   English-dominant file tested. No escalation needed there.
+2. For Arabic/code-switched content, confidence-based escalation would
+   need to be tuned very conservatively (escalate often) to catch real
+   failures, given r=0.547 — undermining the cost-saving point of having
+   a local-first tier at all for this content.
+3. It would still miss the worst case. A threshold tuned to catch
+   `4171339089673893.ogg` (the actual 0% failure) would also have to
+   catch many higher-confidence files that were actually fine, given its
+   `avg_logprob` wasn't even close to the worst in the set.
+4. Escalating more Arabic content to OpenAI isn't a clean fix by itself
+   either — the translation-vs-transcription problem (§ above) is a
+   *different* failure mode that confidence scores wouldn't catch or fix,
+   and could be worse for downstream extraction than a low-confidence but
+   faithful local transcript, since it changes the actual words rather
+   than just the certainty about them.
+
+**A concrete, untested next step worth trying** (flagged as an idea, not
+verified here — out of scope for this pass): OpenAI's API accepts an
+explicit `language` parameter, which is a known mitigation for Whisper's
+translate-instead-of-transcribe tendency. Worth testing whether passing
+`language=ar` reduces the translation behavior seen on
+`1026963569878900.ogg` before deciding OpenAI-escalation is unusable for
+Arabic content.
+
+**Practical recommendation for bulk import**: proceed with local-only for
+English-dominant conversations now. For Arabic/code-switched
+conversations, either escalate unconditionally (skip the confidence gate
+entirely for non-English-detected segments, since confidence didn't
+reliably separate good from catastrophic here) or hold off until the
+`language=ar` mitigation above is tested — don't rely on the current
+avg_logprob threshold alone for this content. This is a recommendation
+grounded in the evidence above; the actual call is Marco's.
