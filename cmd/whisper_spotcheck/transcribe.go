@@ -67,12 +67,12 @@ type transcriptionResponse struct {
 // fileResult is one audio file's outcome for one leg (local or openai),
 // serialized to the intermediate JSON that `report` later merges.
 type fileResult struct {
-	Filename  string                  `json:"filename"`
-	Label     string                  `json:"label"`
-	Response  *transcriptionResponse  `json:"response,omitempty"`
-	Error     string                  `json:"error,omitempty"`
-	RequestMS int64                   `json:"request_ms"`
-	Metrics   *transcriptionMetrics   `json:"metrics,omitempty"`
+	Filename  string                 `json:"filename"`
+	Label     string                 `json:"label"`
+	Response  *transcriptionResponse `json:"response,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	RequestMS int64                  `json:"request_ms"`
+	Metrics   *transcriptionMetrics  `json:"metrics,omitempty"`
 }
 
 // transcriptionMetrics summarizes the raw response into single numbers for
