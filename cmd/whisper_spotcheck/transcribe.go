@@ -213,7 +213,15 @@ func transcribeFile(client *http.Client, baseURL, path, model, agent string) (*t
 	}
 	_ = mw.WriteField("model", model)
 	_ = mw.WriteField("response_format", "verbose_json")
-	_ = mw.WriteField("timestamp_granularities[]", "word")
+	// Deliberately NOT requesting timestamp_granularities[]=word: verified
+	// live against the real OpenAI API that doing so suppresses its
+	// segment-level confidence entirely (segments comes back null) while
+	// only returning placeholder word probabilities (always 0, not real
+	// data) — see whisper_spotcheck_review.md. Segment-level avg_logprob/
+	// no_speech_prob is what §5's escalation trigger is actually about
+	// ("low per-segment transcription confidence"), and it's the one
+	// signal both Speaches and real OpenAI reliably populate with
+	// meaningful values, so that's what this harness relies on.
 	if err := mw.Close(); err != nil {
 		return nil, fmt.Errorf("close multipart writer: %w", err)
 	}
