@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -141,6 +142,67 @@ func (s *EdgeStore) GetBySubjectAndPredicate(ctx context.Context, subjectID uuid
 	}
 
 	return edges, rows.Err()
+}
+
+// Reinforce updates only last_reinforced — nothing else. Kept separate
+// from Update() specifically so reinforcing an edge can never accidentally
+// rewrite confidence, predicate, or any other field via a stray
+// full-object update; this method's whole contract is "touch the
+// timestamp, nothing more."
+//
+// now is taken as an explicit parameter (matching Update's existing
+// pattern of binding e.LastReinforced directly rather than relying on SQL
+// now()) rather than letting Postgres own the value — this keeps the
+// method deterministically testable without wall-clock sleeps.
+//
+// decay_locked edges ARE reinforced by this method: last_reinforced still
+// updates, since a correction being independently reconfirmed later is
+// still real information worth recording. What decay_locked actually
+// protects is confidence, which this method never touches regardless of
+// the flag — see EffectiveConfidence, which short-circuits on
+// DecayLocked before ever consulting LastReinforced. Reinforcing a locked
+// edge's timestamp doesn't weaken that protection.
+func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, now time.Time) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE edges SET last_reinforced = $1 WHERE id = $2
+	`, now, edgeID)
+	return err
+}
+
+// FindMatchingEdge looks for an existing edge with the same subject_id,
+// predicate, and object (object_id or object_literal — exact match only;
+// near-duplicate fuzzy merging of similar-but-not-identical objects is the
+// Reflection Engine's job, §9.2, not this) as the given values. Returns
+// (nil, nil) if no match exists. Used to decide whether a newly extracted
+// triple should reinforce an existing edge (Reinforce) or become a new one
+// (Create) — that decision itself is the caller's, not this method's.
+func (s *EdgeStore) FindMatchingEdge(ctx context.Context, subjectID uuid.UUID, predicate string, objectID *uuid.UUID, objectLiteral *string) (*Edge, error) {
+	candidates, err := s.GetBySubjectAndPredicate(ctx, subjectID, predicate)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, e := range candidates {
+		if edgeObjectMatches(e, objectID, objectLiteral) {
+			return e, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// edgeObjectMatches reports whether e's object (object_id or
+// object_literal — the schema's XOR constraint guarantees exactly one of
+// e's two is set) exactly matches the given objectID/objectLiteral. Exact
+// match only, by design — see FindMatchingEdge.
+func edgeObjectMatches(e *Edge, objectID *uuid.UUID, objectLiteral *string) bool {
+	if objectID != nil && e.ObjectID != nil {
+		return *objectID == *e.ObjectID
+	}
+	if objectLiteral != nil && e.ObjectLiteral != nil {
+		return *objectLiteral == *e.ObjectLiteral
+	}
+	return false
 }
 
 // Delete is intentionally not implemented: edges are never hard-deleted per
