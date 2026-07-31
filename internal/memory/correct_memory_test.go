@@ -174,7 +174,11 @@ func TestCorrectMemory_RollsBackIfNewEdgeInsertFails(t *testing.T) {
 	subject := createTestEntity(t, ctx, entityStore, "CorrectMemory Insert Failure Subject")
 	old := seedOldEdge(t, ctx, edgeStore, subject.ID, "old fact")
 
-	newLiteral := "corrected fact"
+	// Unique per run: this test counts rows by this exact literal, and the
+	// local docker-compose Postgres volume persists across test runs — a
+	// literal reused across tests/runs would let unrelated rows from
+	// earlier successful tests pollute the count.
+	newLiteral := "corrected fact " + uuid.New().String()
 	nonexistentSubject := uuid.New()
 
 	_, err := edgeStore.CorrectMemory(ctx, old.ID, CorrectionInput{
