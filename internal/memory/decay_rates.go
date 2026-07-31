@@ -33,12 +33,12 @@ const (
 	// for event_present is "lives in Beirut") — half-life of 150 days, the
 	// midpoint of §7.1's "several months" / 120-180 day guidance:
 	//
-	//	exp(-r*150) = 0.5  =>  r = ln(2)/150 ≈ 0.0046
+	//	exp(-r*150) = 0.5  =>  r = ln(2)/150 ≈ 0.004621
 	//
 	// A contradicting edge still drops the OLD edge's confidence sharply
 	// and immediately per §7.2 — that's a separate mechanism (not built in
 	// this issue), not something this decay rate needs to account for.
-	DecayRateSlow = 0.0046
+	DecayRateSlow = 0.004621
 
 	// Time-bound facts (§7.1: has_event/plans_to, i.e. event_future post-
 	// §8.5 split) — proposal calls this "hard expiry once the date
