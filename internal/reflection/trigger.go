@@ -77,8 +77,17 @@ type Trigger struct {
 	mu           sync.Mutex
 	lastActivity time.Time
 	lastRunAt    time.Time
-	running      bool
-	cancel       context.CancelFunc
+	// idleHandled tracks whether a pass has already fired for the current
+	// idle stretch, so staying idle doesn't re-trigger on every poll tick.
+	// RecordActivity resets it to false. It's a dedicated flag rather than
+	// comparing lastRunAt/lastActivity timestamps (an earlier version did
+	// that) because at construction both are set from two back-to-back
+	// now() calls, making lastRunAt >= lastActivity from the start — a
+	// timestamp comparison would then treat the very first idle period as
+	// already "handled" before any pass ever ran.
+	idleHandled bool
+	running     bool
+	cancel      context.CancelFunc
 }
 
 // NewTrigger builds a Trigger. onConsolidate is called (with a derived,
@@ -145,6 +154,7 @@ func (t *Trigger) Start(ctx context.Context) {
 func (t *Trigger) RecordActivity() {
 	t.mu.Lock()
 	t.lastActivity = t.now()
+	t.idleHandled = false
 	wasRunning := t.running
 	if wasRunning && t.cancel != nil {
 		t.cancel()
@@ -174,20 +184,17 @@ func (t *Trigger) checkAndMaybeRun(parentCtx context.Context) {
 	idleFor := now.Sub(t.lastActivity)
 	sinceLastRun := now.Sub(t.lastRunAt)
 
-	// Once a pass has run at or after the most recent activity, the idle
-	// period that triggered it has been "handled" — without this check,
-	// staying idle would re-trigger a new pass on every single poll tick
-	// for as long as the idle period continues, instead of firing once
-	// per idle period as §9.1 intends. The max-interval condition below
-	// doesn't need an equivalent guard: lastRunAt is updated at the end of
-	// every pass regardless of which condition fired it, so
-	// sinceLastRun resets to ~0 immediately after any pass and a full
-	// MaxInterval has to re-elapse before it can fire again.
-	handledThisIdlePeriod := !t.lastRunAt.Before(t.lastActivity)
-
+	// idleHandled guards against re-triggering a new pass on every single
+	// poll tick for as long as an idle period continues — it's set once a
+	// pass fires and cleared by RecordActivity, so a given idle stretch
+	// only ever fires once. The max-interval condition below doesn't need
+	// an equivalent guard: lastRunAt is updated at the end of every pass
+	// regardless of which condition fired it, so sinceLastRun resets to
+	// ~0 immediately after any pass and a full MaxInterval has to
+	// re-elapse before it can fire again.
 	var reason string
 	switch {
-	case idleFor >= t.cfg.IdleThreshold && !handledThisIdlePeriod:
+	case idleFor >= t.cfg.IdleThreshold && !t.idleHandled:
 		reason = "idle_threshold"
 	case sinceLastRun >= t.cfg.MaxInterval:
 		reason = "max_interval_fallback"
@@ -199,6 +206,7 @@ func (t *Trigger) checkAndMaybeRun(parentCtx context.Context) {
 	runCtx, cancel := context.WithCancel(parentCtx)
 	t.running = true
 	t.cancel = cancel
+	t.idleHandled = true
 	t.mu.Unlock()
 
 	t.logInfo("reflection_pass_started", map[string]any{
