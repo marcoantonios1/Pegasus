@@ -51,10 +51,12 @@ func runReport(args []string) error {
 	b.WriteString("**How to rate:** use whatever scale is most useful to you (e.g. usable/unusable, ")
 	b.WriteString("or a 1-5 scale, or a word-error estimate) — just be consistent, and note which ")
 	b.WriteString("scale you used so the aggregate analysis step interprets it correctly.\n\n")
-	b.WriteString("**Confidence columns** are derived from Whisper's own output, not invented: mean/min ")
-	b.WriteString("word probability where available (Speaches provides per-word probability; see note ")
-	b.WriteString("below on whether OpenAI's response included the same), otherwise mean segment ")
-	b.WriteString("`avg_logprob` (a log-probability — closer to 0 is more confident, more negative is less).\n\n")
+	b.WriteString("**Confidence columns** are Whisper's own segment-level `avg_logprob`/`no_speech_prob` ")
+	b.WriteString("(a log-probability — closer to 0 is more confident, more negative is less), the signal ")
+	b.WriteString("proposal §5's escalation trigger is actually about. Word-level probabilities were tried ")
+	b.WriteString("first but dropped: requesting them from OpenAI's real API suppresses its segment data ")
+	b.WriteString("entirely and returns only placeholder (always-0) word probabilities — see ")
+	b.WriteString("`whisper_spotcheck_review.md` for that finding.\n\n")
 
 	for _, name := range filenames {
 		l := localByFile[name]
@@ -100,12 +102,6 @@ func writeLegBody(b *strings.Builder, r fileResult) {
 	fmt.Fprintf(b, "- language detected: `%s`, duration: %.1fs, request time: %dms\n", r.Response.Language, r.Response.Duration, r.RequestMS)
 
 	if r.Metrics != nil {
-		if r.Metrics.HasWordProbabilities {
-			fmt.Fprintf(b, "- mean word probability: %.3f, min word probability: %.3f (n=%d words)\n",
-				r.Metrics.MeanWordProbability, r.Metrics.MinWordProbability, len(r.Response.Words))
-		} else {
-			b.WriteString("- word-level probabilities: not present in this response\n")
-		}
 		fmt.Fprintf(b, "- mean segment avg_logprob: %.3f, mean no_speech_prob: %.3f (n=%d segments)\n",
 			r.Metrics.MeanSegmentAvgLogprob, r.Metrics.MeanNoSpeechProb, len(r.Response.Segments))
 	}
