@@ -85,6 +85,46 @@ func (s *MessageStore) Update(ctx context.Context, m *Message) error {
 // Delete is intentionally not implemented: messages are never hard-deleted
 // per the proposal's data model.
 
+// GetByIDs returns every message in ids, in no particular order — used by
+// WhyDoWeBelieveThis (internal/api, proposal §12) to resolve an edge's
+// source_message_ids into the actual messages backing it (timestamps for
+// "Seen", sender_id for "Mentioned by", media_type for the source-type
+// breakdown). Returns an empty slice, not an error, for an empty or nil
+// ids.
+func (s *MessageStore) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*Message, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			id, conversation_id, sender_id, media_type, raw_text, transcript,
+			transcript_confidence, media_ref, processed, timestamp
+		FROM messages
+		WHERE id = ANY($1)
+	`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*Message
+	for rows.Next() {
+		var m Message
+
+		if err := rows.Scan(
+			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+		); err != nil {
+			return nil, err
+		}
+
+		msgs = append(msgs, &m)
+	}
+
+	return msgs, rows.Err()
+}
+
 // ConversationIDsForSender returns every distinct conversation_id senderID
 // has ever sent a message in, with no time restriction — used to resolve
 // which conversation(s) belong to a given contact regardless of whether
