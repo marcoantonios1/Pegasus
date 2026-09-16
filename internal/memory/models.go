@@ -61,3 +61,46 @@ type Embedding struct {
 	MessageID uuid.UUID // see Pegasus proposal §6.2
 	Vector    []float32 // see Pegasus proposal §6.2 — 768-dim, nomic-embed-text
 }
+
+// RelationshipStats is the Reflection Engine's per-contact relationship
+// signal (proposal §10), recomputed during consolidation rather than live
+// per message — see reflection.RecomputeRelationshipStats. One current
+// row per contact (relationship_stats_contact_id_idx's UNIQUE constraint
+// on ContactID), overwritten on each consolidation pass rather than kept
+// as history — see migration 000006's comment for why.
+type RelationshipStats struct {
+	ID uuid.UUID
+
+	// ContactID is the person entity this row is about — a 'person'-type
+	// entity, never Marco's own is_self row. See Pegasus proposal §10.
+	ContactID uuid.UUID
+
+	// Frequency is this contact's message volume in the trailing window,
+	// normalized against Marco's mean across all contacts over the same
+	// window — ~1.0 means "about average", not an absolute rate. See
+	// Pegasus proposal §10 and reflection.RecomputeRelationshipStats.
+	Frequency float64
+
+	// ReplySpeed is the median reply latency in seconds, stored raw
+	// (format at read time, per this issue's schema note) — see Pegasus
+	// proposal §10. -1 is a sentinel for "no reply pairs observed in the
+	// window", distinct from 0 (an actual instant reply); see
+	// reflection.RecomputeRelationshipStats.
+	ReplySpeed float64
+
+	// HumorLevel is currently always 0 — there is no upstream sentiment/
+	// humor classification signal for this to read from yet (not in the
+	// messages or edges schema). See reflection.RecomputeRelationshipStats'
+	// doc comment for the full explanation; this is a known, flagged gap,
+	// not a fabricated number.
+	HumorLevel float64
+
+	// Closeness is the hand-weighted composite of the above plus recency
+	// and explicit signals (nickname_is/inside_joke_ref edge counts).
+	// Weights are a first guess pending real-data tuning, per §10's own
+	// "weights are set manually first". See
+	// reflection.RecomputeRelationshipStats.
+	Closeness float64
+
+	ComputedAt time.Time
+}
