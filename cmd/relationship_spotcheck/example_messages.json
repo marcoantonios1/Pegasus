@@ -1,0 +1,14 @@
+{
+  "self_name": "Example Self",
+  "contact_name": "Example Contact",
+  "now": "2026-09-16T18:00:00Z",
+  "messages": [
+    {"sender": "contact", "at": "2026-09-10T08:03:00Z"},
+    {"sender": "self",    "at": "2026-09-10T08:05:00Z"},
+    {"sender": "contact", "at": "2026-09-11T19:40:00Z"},
+    {"sender": "self",    "at": "2026-09-11T19:41:00Z"},
+    {"sender": "contact", "at": "2026-09-14T09:12:00Z"},
+    {"sender": "contact", "at": "2026-09-14T09:13:00Z"},
+    {"sender": "self",    "at": "2026-09-14T09:20:00Z"}
+  ]
+}
