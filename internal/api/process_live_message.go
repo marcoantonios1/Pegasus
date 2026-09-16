@@ -120,9 +120,14 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		return fmt.Errorf("ProcessLiveMessage: %w", err)
 	}
 
+	// Locked section is deliberately narrow: only the in-memory window
+	// state mutation, not the extraction call below. Extraction is a
+	// network round trip to Costguard — holding the lock through it would
+	// serialize every OTHER conversation's live messages behind whichever
+	// one happens to be extracting at the time, for no correctness
+	// reason (their window state is independent). Only the map/slice
+	// mutation itself needs mutual exclusion.
 	a.liveWindowsMu.Lock()
-	defer a.liveWindowsMu.Unlock()
-
 	if a.liveWindows == nil {
 		a.liveWindows = make(map[uuid.UUID]*liveConversationState)
 	}
@@ -135,15 +140,21 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 	wm := extraction.WindowMessage{Speaker: rawMsg.SenderExternalID, Timestamp: rawMsg.Timestamp, Text: *rawMsg.Text}
 	completed, ready := state.windower.Add(wm)
 	state.pendingIDs = append(state.pendingIDs, msg.ID)
+
+	var completedIDs []uuid.UUID
+	if ready {
+		// The message that just triggered closing the window starts the
+		// next one (extraction.LiveWindower.Add's contract), so it's the
+		// LAST element of pendingIDs here, not part of the just-completed
+		// window.
+		completedIDs = state.pendingIDs[:len(state.pendingIDs)-1]
+		state.pendingIDs = state.pendingIDs[len(state.pendingIDs)-1:]
+	}
+	a.liveWindowsMu.Unlock()
+
 	if !ready {
 		return nil // message stored; will be marked processed once its window completes
 	}
-
-	// The message that just triggered closing the window starts the next
-	// one (extraction.LiveWindower.Add's contract), so it's the LAST
-	// element of pendingIDs here, not part of the just-completed window.
-	completedIDs := state.pendingIDs[:len(state.pendingIDs)-1]
-	state.pendingIDs = state.pendingIDs[len(state.pendingIDs)-1:]
 
 	return a.processCompletedWindow(ctx, *completed, sourceType, completedIDs)
 }
