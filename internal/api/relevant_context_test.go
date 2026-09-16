@@ -120,12 +120,15 @@ func TestGetRelevantContext_RankingReflectsWeightedFormula(t *testing.T) {
 	sender := createTestEntity(t, ctx, ts, "person", "Ranking Test Sender")
 	lit := func(s string) *string { return &s }
 
+	queryIndex := randomBasisIndex()
+	farIndex := (queryIndex + 1) % embeddingDim
+
 	now := time.Now()
 	msg1 := createTestMessage(t, ctx, ts, uuid.New(), sender.ID, "text", now)
-	createTestEmbedding(t, ctx, ts, msg1.ID, nearVector(0)) // near-identical to the query vector below
+	createTestEmbedding(t, ctx, ts, msg1.ID, nearVector(queryIndex)) // near-identical to the query vector below
 
 	msg2 := createTestMessage(t, ctx, ts, uuid.New(), sender.ID, "text", now)
-	createTestEmbedding(t, ctx, ts, msg2.ID, basisVector(1, 1)) // orthogonal to the query vector
+	createTestEmbedding(t, ctx, ts, msg2.ID, basisVector(farIndex, 1)) // orthogonal to the query vector
 
 	highSim := createTestEdge(t, ctx, ts, &memory.Edge{
 		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: lit("trivial"),
@@ -138,7 +141,7 @@ func TestGetRelevantContext_RankingReflectsWeightedFormula(t *testing.T) {
 		DecayRate: memory.DecayRateStable, SourceMessageIDs: []uuid.UUID{msg2.ID},
 	}, now)
 
-	embedder := &fakeEmbedder{vector: basisVector(0, 1)}
+	embedder := &fakeEmbedder{vector: basisVector(queryIndex, 1)}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder)
 
 	results, err := a.GetRelevantContext(ctx, "some query", Filters{

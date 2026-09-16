@@ -79,13 +79,16 @@ func TestSearchSemantic_ReturnsNearestMessages(t *testing.T) {
 	sender := createTestEntity(t, ctx, ts, "person", "Semantic Search Sender")
 	now := time.Now()
 
+	queryIndex := randomBasisIndex()
+	farIndex := (queryIndex + 1) % embeddingDim
+
 	near := createTestMessage(t, ctx, ts, uuid.New(), sender.ID, "text", now)
-	createTestEmbedding(t, ctx, ts, near.ID, nearVector(0))
+	createTestEmbedding(t, ctx, ts, near.ID, nearVector(queryIndex))
 
 	far := createTestMessage(t, ctx, ts, uuid.New(), sender.ID, "text", now)
-	createTestEmbedding(t, ctx, ts, far.ID, basisVector(1, 1))
+	createTestEmbedding(t, ctx, ts, far.ID, basisVector(farIndex, 1))
 
-	embedder := &fakeEmbedder{vector: basisVector(0, 1)}
+	embedder := &fakeEmbedder{vector: basisVector(queryIndex, 1)}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder)
 
 	results, err := a.SearchSemantic(ctx, "some query", 1)

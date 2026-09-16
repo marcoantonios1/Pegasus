@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"math/rand"
 	"os"
 	"testing"
 	"time"
@@ -145,6 +146,25 @@ func nearVector(index int) []float32 {
 	v[index] = 0.95
 	v[(index+1)%embeddingDim] = 0.05
 	return v
+}
+
+// randomBasisIndex picks a fresh random index into a basisVector/
+// nearVector for this test — NOT a fixed constant like 0 or 1. These
+// tests run against a real, persistent, shared local dev database with
+// no per-test reset (same convention as every other DB-backed test in
+// this codebase), and EmbeddingStore.SearchSimilarMessages searches the
+// WHOLE embeddings table with no scoping filter, by design (it's a pure
+// vector search — see its own doc comment). A fixed index would mean
+// every test run leaves behind an identical vector, so a later run's
+// "nearest" query ties exactly against leftover rows from earlier runs,
+// and Postgres doesn't guarantee which tied row comes back first — this
+// bit a real test failure during development (two runs of the same
+// nearVector(0) both at distance 0, LIMIT 1 non-deterministically
+// returning either). A random index makes an accidental collision with
+// leftover data astronomically unlikely without needing to clean up the
+// shared table.
+func randomBasisIndex() int {
+	return rand.Intn(embeddingDim)
 }
 
 func createTestEmbedding(t *testing.T, ctx context.Context, ts *testStores, messageID uuid.UUID, vector []float32) *memory.Embedding {
