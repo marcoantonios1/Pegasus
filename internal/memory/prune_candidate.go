@@ -46,6 +46,25 @@ func DefaultPruneConfig() PruneConfig {
 	}
 }
 
+// withDefaults fills in a zero PruneConfig field with the package
+// default, matching the zero-value-fallback pattern this codebase already
+// uses for TriggerConfig and DedupConfig — so a caller who passes
+// PruneConfig{} (forgetting DefaultPruneConfig()) gets working floors
+// instead of 0/0, which would make IsPruneCandidate never fire (an
+// EffectiveConfidence or Importance below 0 essentially never happens) and
+// silently defeat pruning entirely. As with those two configs, this means
+// an explicit floor of exactly 0 can't be distinguished from "unset" — the
+// same accepted tradeoff made there.
+func (c PruneConfig) withDefaults() PruneConfig {
+	if c.ConfidenceFloor <= 0 {
+		c.ConfidenceFloor = DefaultConfidenceFloor
+	}
+	if c.ImportanceFloor <= 0 {
+		c.ImportanceFloor = DefaultImportanceFloor
+	}
+	return c
+}
+
 // IsPruneCandidate implements proposal §9.2's "flag low-importance/
 // low-confidence edges for exclusion" pipeline step as a read-time
 // computed check, not a stored column — the same design already used for
@@ -93,6 +112,8 @@ func DefaultPruneConfig() PruneConfig {
 // so a pruned edge stays fully queryable by direct lookup; pruning only
 // affects default retrieval ranking, never direct lookup, by construction.
 func IsPruneCandidate(edge Edge, now time.Time, cfg PruneConfig) bool {
+	cfg = cfg.withDefaults()
+
 	if edge.DecayLocked || edge.IsCorrection {
 		return false
 	}

@@ -9,6 +9,25 @@ import (
 
 var testPruneConfig = PruneConfig{ConfidenceFloor: 0.15, ImportanceFloor: 0.1}
 
+// TestIsPruneCandidate_ZeroConfigFallsBackToDefaults guards against a
+// caller passing the zero-value PruneConfig{} (e.g. forgetting
+// DefaultPruneConfig()) and silently getting 0/0 floors, under which
+// IsPruneCandidate would essentially never fire. Matches the zero-value-
+// fallback pattern already used for TriggerConfig and DedupConfig.
+func TestIsPruneCandidate_ZeroConfigFallsBackToDefaults(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	e := Edge{
+		Confidence:     0.05, // below DefaultConfidenceFloor (0.15)
+		Importance:     0.9,
+		DecayRate:      DecayRateStable,
+		LastReinforced: now,
+	}
+
+	if got := IsPruneCandidate(e, now, PruneConfig{}); !got {
+		t.Errorf("expected PruneConfig{} to fall back to working default floors (so a low-confidence edge is still flagged), got false")
+	}
+}
+
 // TestIsPruneCandidate_ThresholdCombinations covers requirement 7:
 // confidence/importance combinations above and below each floor
 // individually, and both below.
