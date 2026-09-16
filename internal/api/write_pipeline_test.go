@@ -200,9 +200,18 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 		Triager: liveTriager, Extractor: liveExtractor,
 	})
 
+	// Live windowing closes on a DIFFERENT bound than historical
+	// (extraction.MaxLiveWindowMessages = 10 messages or 5 minutes,
+	// vs. historical's fixed extraction.DefaultHistoricalWindowSize = 8
+	// — see extraction.LiveWindower's own doc comment for why live and
+	// historical windowing deliberately differ). This test is comparing
+	// the two paths' RESULTING EDGE shape, not their window sizes, so it
+	// sends however many live messages actually close a live window
+	// (11, same as TestProcessLiveMessage_WindowTriggersExtractionWithCorrectSourceWeight),
+	// not extraction.DefaultHistoricalWindowSize.
 	conversationExternalID := "live-equiv-" + uuid.New().String()
 	base := time.Now()
-	for i := 0; i < extraction.DefaultHistoricalWindowSize; i++ {
+	for i := 0; i < extraction.MaxLiveWindowMessages+1; i++ {
 		raw := ingestion.RawMessage{
 			ExternalID: "msg-" + uuid.New().String(), Platform: "whatsapp",
 			ConversationID: conversationExternalID, SenderExternalID: "John",
