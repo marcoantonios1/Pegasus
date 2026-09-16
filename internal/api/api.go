@@ -24,6 +24,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	"github.com/google/uuid"
@@ -92,6 +93,7 @@ type API struct {
 	extractor        Extractor
 	activityRecorder ActivityRecorder
 	selfExternalIDs  map[string]bool
+	logger           func(format string, args ...any)
 
 	liveWindowsMu sync.Mutex
 	liveWindows   map[uuid.UUID]*liveConversationState
@@ -142,6 +144,13 @@ type PipelineDeps struct {
 	// why), so the pipeline has to be told explicitly which external IDs
 	// are Marco rather than inferring it from content.
 	SelfExternalIDs []string
+
+	// Logger receives one line of progress per completed window during
+	// ImportWhatsApp — the minimum progress-tracking bar its own doc
+	// comment settles on (log lines with counts, not a checkpoint file/
+	// table; see that comment for why full resumability is out of this
+	// issue's scope). Defaults to log.Printf if nil.
+	Logger func(format string, args ...any)
 }
 
 // WithPipeline attaches write-pipeline dependencies to an already-
@@ -152,6 +161,7 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	a.triager = deps.Triager
 	a.extractor = deps.Extractor
 	a.activityRecorder = deps.ActivityRecorder
+	a.logger = deps.Logger
 
 	a.selfExternalIDs = make(map[string]bool, len(deps.SelfExternalIDs))
 	for _, id := range deps.SelfExternalIDs {
@@ -159,4 +169,12 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	}
 
 	return a
+}
+
+func (a *API) logf(format string, args ...any) {
+	if a.logger != nil {
+		a.logger(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
