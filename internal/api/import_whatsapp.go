@@ -139,6 +139,14 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 	}
 
 	result := &ImportResult{ExternalConversationID: externalConversationID, MessagesParsed: len(raws)}
+	// Deferred rather than set before each return: an earlier version set
+	// this manually before every error return below, and missed the three
+	// error paths in the per-message loop just below (a real bug caught in
+	// review — a run failing during message storage reported Duration=0
+	// instead of the actual elapsed time). A single defer covers every
+	// return uniformly, including ones added later, without relying on
+	// each one remembering to set it.
+	defer func() { result.Duration = time.Since(start) }()
 
 	var windowMsgs []extraction.WindowMessage
 	var messageIDs []uuid.UUID
@@ -186,7 +194,6 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 
 		isCandidate, err := a.triager.IsWindowCandidate(ctx, w)
 		if err != nil {
-			result.Duration = time.Since(start)
 			return result, fmt.Errorf("ImportWhatsApp: triage window %d/%d: %w", i+1, len(windows), err)
 		}
 		wr.IsCandidate = isCandidate
@@ -194,7 +201,6 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 		if !isCandidate {
 			for _, id := range ids {
 				if err := a.messages.MarkProcessed(ctx, id); err != nil {
-					result.Duration = time.Since(start)
 					return result, fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
 				}
 			}
@@ -204,20 +210,17 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 
 		triples, err := a.extractor.ExtractWindow(ctx, w)
 		if err != nil {
-			result.Duration = time.Since(start)
 			return result, fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
 		}
 
 		outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, ids, time.Now())
 		if err != nil {
-			result.Duration = time.Since(start)
 			return result, fmt.Errorf("ImportWhatsApp: store extracted triples for window %d/%d: %w", i+1, len(windows), err)
 		}
 		wr.Outcomes = outcomes
 
 		for _, id := range ids {
 			if err := a.messages.MarkProcessed(ctx, id); err != nil {
-				result.Duration = time.Since(start)
 				return result, fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
 			}
 		}
@@ -227,7 +230,6 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 		a.logf("ImportWhatsApp %s: window %d/%d done (%d triples so far)", externalConversationID, i+1, len(windows), triplesExtracted)
 	}
 
-	result.Duration = time.Since(start)
 	a.logf("ImportWhatsApp %s: done — %d messages, %d windows, %d triples", externalConversationID, len(raws), len(windows), triplesExtracted)
 	return result, nil
 }
