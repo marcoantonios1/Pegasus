@@ -3,11 +3,24 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
 )
+
+// escapeLikePattern escapes '\', '%', and '_' in s so it can be safely
+// wrapped in a LIKE/ILIKE '%'...'%' pattern (with ESCAPE '\') and match
+// only literal occurrences of s — without this, a caller's search term
+// containing '%' or '_' would be silently treated as a wildcard instead
+// of the literal character they typed. The backslash itself must be
+// escaped first, or escaping '%' into '\%' would then have its own
+// backslash re-escaped on a second pass.
+func escapeLikePattern(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
 
 // EdgeCandidate pairs an edge with its similarity score against whatever
 // query vector produced it (0 when no query vector was given — see
@@ -179,22 +192,31 @@ func (s *EdgeStore) SearchRelevant(ctx context.Context, queryVector []float32, f
 // from SearchRelevant/vector search: this finds edges matching specific
 // terms, not edges related in meaning without keyword overlap.
 //
+// queryText is escaped (escapeLikePattern) before being wrapped in
+// '%'...'%' — ILIKE treats a bare '%' or '_' in the search term as a
+// wildcard, not a literal character, so an unescaped query for e.g. "50%"
+// would match far more than intended. The query is still fully
+// parameterized either way (no SQL injection risk existed here); this is
+// purely about matching what the caller actually typed.
+//
 // Always excludes superseded edges, same as SearchRelevant, and for the
 // same reason.
 func (s *EdgeStore) SearchByText(ctx context.Context, queryText string, filters SearchFilters, limit int) ([]*Edge, error) {
+	escaped := escapeLikePattern(queryText)
+
 	rows, err := s.db.Query(ctx, `
 		SELECT `+edgeColumns+`
 		FROM edges e
 		JOIN entities subj ON subj.id = e.subject_id
 		WHERE `+searchFiltersWhere+`
 			AND (
-				subj.canonical_name ILIKE '%' || $4 || '%'
-				OR e.predicate ILIKE '%' || $4 || '%'
-				OR e.object_literal ILIKE '%' || $4 || '%'
+				subj.canonical_name ILIKE '%' || $4 || '%' ESCAPE '\'
+				OR e.predicate ILIKE '%' || $4 || '%' ESCAPE '\'
+				OR e.object_literal ILIKE '%' || $4 || '%' ESCAPE '\'
 			)
 		ORDER BY e.importance DESC, e.first_seen DESC
 		LIMIT $5
-	`, filters.SubjectID, filters.SourceTypes, filters.Since, queryText, limit)
+	`, filters.SubjectID, filters.SourceTypes, filters.Since, escaped, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search edges by text: %w", err)
 	}

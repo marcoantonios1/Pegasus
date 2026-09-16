@@ -39,6 +39,43 @@ func TestSearchMemory_MatchesByKeyword(t *testing.T) {
 	assertContainsEdge(t, results, nonMatching.ID, false)
 }
 
+// TestSearchMemory_LiteralPercentInQueryIsNotAWildcard is a regression
+// test for a real bug found in review: ILIKE treats an unescaped '%' or
+// '_' in the search term as a wildcard, not a literal character. A query
+// containing a literal '%' must match only that literal text, not
+// silently behave as a broader wildcard search.
+func TestSearchMemory_LiteralPercentInQueryIsNotAWildcard(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	subject := createTestEntity(t, ctx, ts, "person", "Percent Query Subject")
+	lit := func(s string) *string { return &s }
+	now := time.Now()
+
+	literalMatch := createTestEdge(t, ctx, ts, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: lit("save 50% of income"),
+		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow,
+	}, now)
+	// Would match "50% of income" too if '%' were treated as a wildcard
+	// (since ILIKE '%50%...%' matches any text starting with "50"), but
+	// must NOT match a literal "50%" query.
+	unrelated := createTestEdge(t, ctx, ts, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: lit("500 push-ups a day"),
+		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow,
+	}, now)
+
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
+
+	results, err := a.SearchMemory(ctx, "50%", Filters{SubjectID: &subject.ID})
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	assertContainsEdge(t, results, literalMatch.ID, true)
+	assertContainsEdge(t, results, unrelated.ID, false)
+}
+
 func TestSearchMemory_ExcludesSupersededEdges(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
