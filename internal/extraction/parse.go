@@ -13,20 +13,31 @@ import (
 // those strings to entities.id rows and writing edges is downstream work
 // (entity resolution / the Relationship Graph stage in the architecture
 // diagram), out of scope for this package.
+//
+// IsCorrection did not exist before the write-pipeline issue (proposal
+// §13) needed a way to detect "Marco is explicitly correcting a
+// previously stated fact" so ProcessLiveMessage/ImportWhatsApp can route
+// it through memory.CorrectMemory instead of a normal edge write. That
+// issue's own instructions were explicit that if extraction had no way to
+// flag this, the minimal fix was extending extraction's own output shape
+// with an is_correction field, rather than standing up a separate
+// classifier — this is that minimal extension, not a second model call.
 type ExtractedTriple struct {
-	Subject    string
-	Predicate  string
-	Object     string
-	ObjectType string // "entity" | "literal"
-	Confidence float64
+	Subject      string
+	Predicate    string
+	Object       string
+	ObjectType   string // "entity" | "literal"
+	Confidence   float64
+	IsCorrection bool
 }
 
 type rawTriple struct {
-	Subject    string  `json:"subject"`
-	Predicate  string  `json:"predicate"`
-	Object     string  `json:"object"`
-	ObjectType string  `json:"object_type"`
-	Confidence float64 `json:"confidence"`
+	Subject      string  `json:"subject"`
+	Predicate    string  `json:"predicate"`
+	Object       string  `json:"object"`
+	ObjectType   string  `json:"object_type"`
+	Confidence   float64 `json:"confidence"`
+	IsCorrection bool    `json:"is_correction"`
 }
 
 // ParseModelOutput parses the model's raw text response into triples. §8.2
@@ -47,11 +58,12 @@ func ParseModelOutput(raw string) ([]ExtractedTriple, error) {
 	triples := make([]ExtractedTriple, len(rawTriples))
 	for i, rt := range rawTriples {
 		triples[i] = ExtractedTriple{
-			Subject:    rt.Subject,
-			Predicate:  rt.Predicate,
-			Object:     rt.Object,
-			ObjectType: rt.ObjectType,
-			Confidence: rt.Confidence,
+			Subject:      rt.Subject,
+			Predicate:    rt.Predicate,
+			Object:       rt.Object,
+			ObjectType:   rt.ObjectType,
+			Confidence:   rt.Confidence,
+			IsCorrection: rt.IsCorrection,
 		}
 	}
 	return triples, nil

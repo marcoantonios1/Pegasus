@@ -63,3 +63,38 @@ func parseTriageResponse(resp string) bool {
 	trimmed := strings.ToUpper(strings.TrimSpace(resp))
 	return trimmed == "CANDIDATE" || strings.HasPrefix(trimmed, "CANDIDATE")
 }
+
+const triageWindowPromptTemplate = `You are a fast, coarse filter, not a careful reader. Below is a short block of conversation messages. Decide whether ANY of them might contain a factual, event, or emotional signal worth extracting later, or whether the whole block is just noise (greetings, acknowledgements, small talk with no content, emoji-only reactions, etc.).
+
+Respond with exactly one word: CANDIDATE or NOISE. No punctuation, no explanation.
+
+Messages:
+%s`
+
+// IsWindowCandidate is IsCandidate generalized to a whole window (proposal
+// §5's "cost discipline for historical import" note): ONE triage call
+// covers every message in w, rather than one call per message. This is
+// the batched call pattern historical/bulk import needs — llama3.2:3b
+// triage at years-of-backlog volume needs real throughput, and triaging
+// message-by-message the same way the live path does would multiply call
+// count by the average window size for no benefit bulk import can use
+// (unlike live traffic, a historical window's messages are all already
+// available at once, so there's no reason to triage them one at a time).
+// The live path (ProcessLiveMessage) uses IsCandidate instead, since a
+// live message needs a verdict before it's even known which window it
+// will end up in.
+func (t *Triager) IsWindowCandidate(ctx context.Context, w Window) (bool, error) {
+	var b strings.Builder
+	for _, m := range w.Messages {
+		fmt.Fprintf(&b, "%s: %s\n", m.Speaker, m.Text)
+	}
+
+	prompt := fmt.Sprintf(triageWindowPromptTemplate, b.String())
+
+	resp, err := t.Client.CompleteWithModel(ctx, TriageModel, prompt)
+	if err != nil {
+		return false, fmt.Errorf("triage window: %w", err)
+	}
+
+	return parseTriageResponse(resp), nil
+}

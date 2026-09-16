@@ -85,6 +85,17 @@ func (s *MessageStore) Update(ctx context.Context, m *Message) error {
 // Delete is intentionally not implemented: messages are never hard-deleted
 // per the proposal's data model.
 
+// MarkProcessed sets processed = true for id — a narrow, single-field
+// update, same reasoning as EdgeStore.Reinforce: a full Update() risks
+// accidentally touching an unrelated field (raw_text, sender_id, ...)
+// when only this one needs to change. Used by the write pipeline
+// (internal/api) once a message's window has been extracted (or once
+// it's determined there's nothing further to do with it).
+func (s *MessageStore) MarkProcessed(ctx context.Context, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `UPDATE messages SET processed = true WHERE id = $1`, id)
+	return err
+}
+
 // GetByIDs returns every message in ids, in no particular order — used by
 // WhyDoWeBelieveThis (internal/api, proposal §12) to resolve an edge's
 // source_message_ids into the actual messages backing it (timestamps for
