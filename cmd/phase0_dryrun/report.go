@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math/rand"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
