@@ -16,6 +16,47 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
+// WindowResult is one window's outcome within an ImportWhatsApp run:
+// whether triage flagged it, and (if so) what extraction/storage did with
+// each triple it produced. Messages is carried alongside for reporting
+// tools (the Phase 0 dry-run, cmd/phase0_dryrun) that need to show a
+// human the actual conversation text behind an extracted edge — that
+// context isn't recoverable after the fact from just the resulting edges
+// (see EdgeStore.SearchRelevant's doc comment on why edges join back to
+// messages via source_message_ids, not the other way around; this avoids
+// needing that join for a report that already has the window in hand).
+type WindowResult struct {
+	Index       int
+	Messages    []extraction.WindowMessage
+	IsCandidate bool
+	Outcomes    []TripleOutcome
+}
+
+// ImportResult is ImportWhatsApp's per-conversation summary — added
+// specifically because the Phase 0 dry-run tooling (cmd/phase0_dryrun)
+// has no other way to observe triage-candidate rate, reinforcement-vs-
+// new-edge counts, or per-window provenance without either a special-
+// cased dry-run code path (which that issue's own instructions forbid)
+// or fragile after-the-fact DB diffing. Any real caller of ImportWhatsApp
+// benefits from this same progress/stats data — it is not a dry-run-only
+// concern, which is why it lives on the real return type rather than a
+// wrapper.
+type ImportResult struct {
+	ExternalConversationID string
+
+	// MessagesParsed is every message the export file parser (adapter)
+	// produced, including voice/image/video entries that never reach
+	// windowing/extraction (see the "not text" branch in ImportWhatsApp).
+	MessagesParsed int
+	// MessagesTextExtractable is the subset with MediaType == text and
+	// non-nil Text — the ones that actually got windowed.
+	MessagesTextExtractable int
+
+	Windows []WindowResult
+
+	Duration time.Duration
+}
+
 // ImportWhatsApp implements proposal §13's historical bulk pipeline for
 // one WhatsApp export file: parse -> persist messages -> batched triage
 // -> extraction -> storage, ending with the same shape of edges the live
@@ -72,14 +113,16 @@ import (
 // (see ActivityRecorder's own doc comment in process_live_message.go);
 // letting it suppress the idle-based consolidation trigger, or skew the
 // max-interval fallback's timing, would be misleading, not helpful.
-func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) error {
+func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportResult, error) {
 	if a.triager == nil || a.extractor == nil {
-		return fmt.Errorf("ImportWhatsApp: API has no Triager/Extractor configured — call WithPipeline first")
+		return nil, fmt.Errorf("ImportWhatsApp: API has no Triager/Extractor configured — call WithPipeline first")
 	}
+
+	start := time.Now()
 
 	f, err := os.Open(exportPath)
 	if err != nil {
-		return fmt.Errorf("ImportWhatsApp: open %s: %w", exportPath, err)
+		return nil, fmt.Errorf("ImportWhatsApp: open %s: %w", exportPath, err)
 	}
 	defer f.Close()
 
@@ -92,90 +135,101 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) error {
 
 	raws, err := whatsapp.NewExportParser().Parse(f, externalConversationID)
 	if err != nil {
-		return fmt.Errorf("ImportWhatsApp: parse %s: %w", exportPath, err)
+		return nil, fmt.Errorf("ImportWhatsApp: parse %s: %w", exportPath, err)
 	}
+
+	result := &ImportResult{ExternalConversationID: externalConversationID, MessagesParsed: len(raws)}
 
 	var windowMsgs []extraction.WindowMessage
 	var messageIDs []uuid.UUID
 	for _, r := range raws {
+		sender, err := a.resolveSender(ctx, r.SenderExternalID)
+		if err != nil {
+			return result, fmt.Errorf("ImportWhatsApp: resolve sender: %w", err)
+		}
+
 		if r.MediaType != ingestion.MediaTypeText || r.Text == nil {
 			// Same limitation as internal/bulkimport.processConversation:
 			// voice/image entries carry no text at this stage (no
 			// transcription/vision pipeline wired in anywhere yet) — not
 			// extractable, so not windowed. Still stored and marked
 			// processed, since there is nothing further to do with them.
-			sender, err := a.resolveSender(ctx, r.SenderExternalID)
-			if err != nil {
-				return fmt.Errorf("ImportWhatsApp: resolve sender: %w", err)
-			}
 			msg := &memory.Message{
 				ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 				RawText: r.Text, MediaRef: r.MediaURL, Processed: true, Timestamp: r.Timestamp,
 			}
 			if err := a.messages.Create(ctx, msg); err != nil {
-				return fmt.Errorf("ImportWhatsApp: store message: %w", err)
+				return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 			}
 			continue
 		}
 
-		sender, err := a.resolveSender(ctx, r.SenderExternalID)
-		if err != nil {
-			return fmt.Errorf("ImportWhatsApp: resolve sender: %w", err)
-		}
 		msg := &memory.Message{
 			ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 			RawText: r.Text, MediaRef: r.MediaURL, Processed: false, Timestamp: r.Timestamp,
 		}
 		if err := a.messages.Create(ctx, msg); err != nil {
-			return fmt.Errorf("ImportWhatsApp: store message: %w", err)
+			return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 		}
 
 		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: r.SenderExternalID, Timestamp: r.Timestamp, Text: *r.Text})
 		messageIDs = append(messageIDs, msg.ID)
 	}
+	result.MessagesTextExtractable = len(windowMsgs)
 
 	windows, idGroups := windowWithMessageIDs(windowMsgs, messageIDs, extraction.DefaultHistoricalWindowSize)
 
-	var windowsProcessed, triplesExtracted int
+	var triplesExtracted int
 	for i, w := range windows {
 		ids := idGroups[i]
+		wr := WindowResult{Index: i, Messages: w.Messages}
 
 		isCandidate, err := a.triager.IsWindowCandidate(ctx, w)
 		if err != nil {
-			return fmt.Errorf("ImportWhatsApp: triage window %d/%d: %w", i+1, len(windows), err)
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("ImportWhatsApp: triage window %d/%d: %w", i+1, len(windows), err)
 		}
+		wr.IsCandidate = isCandidate
+
 		if !isCandidate {
 			for _, id := range ids {
 				if err := a.messages.MarkProcessed(ctx, id); err != nil {
-					return fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
+					result.Duration = time.Since(start)
+					return result, fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
 				}
 			}
-			windowsProcessed++
+			result.Windows = append(result.Windows, wr)
 			continue
 		}
 
 		triples, err := a.extractor.ExtractWindow(ctx, w)
 		if err != nil {
-			return fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
 		}
 
-		if _, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, ids, time.Now()); err != nil {
-			return fmt.Errorf("ImportWhatsApp: store extracted triples for window %d/%d: %w", i+1, len(windows), err)
+		outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, ids, time.Now())
+		if err != nil {
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("ImportWhatsApp: store extracted triples for window %d/%d: %w", i+1, len(windows), err)
 		}
+		wr.Outcomes = outcomes
 
 		for _, id := range ids {
 			if err := a.messages.MarkProcessed(ctx, id); err != nil {
-				return fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
+				result.Duration = time.Since(start)
+				return result, fmt.Errorf("ImportWhatsApp: mark message %s processed: %w", id, err)
 			}
 		}
 
-		windowsProcessed++
+		result.Windows = append(result.Windows, wr)
 		triplesExtracted += len(triples)
-		a.logf("ImportWhatsApp %s: window %d/%d done (%d triples so far)", externalConversationID, windowsProcessed, len(windows), triplesExtracted)
+		a.logf("ImportWhatsApp %s: window %d/%d done (%d triples so far)", externalConversationID, i+1, len(windows), triplesExtracted)
 	}
 
-	a.logf("ImportWhatsApp %s: done — %d messages, %d windows, %d triples", externalConversationID, len(raws), windowsProcessed, triplesExtracted)
-	return nil
+	result.Duration = time.Since(start)
+	a.logf("ImportWhatsApp %s: done — %d messages, %d windows, %d triples", externalConversationID, len(raws), len(windows), triplesExtracted)
+	return result, nil
 }
 
 // windowWithMessageIDs partitions windowMsgs into fixed-size windows via

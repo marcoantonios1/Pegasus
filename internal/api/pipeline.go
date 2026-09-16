@@ -124,6 +124,39 @@ func objectEntityTypeForPredicate(predicate string) string {
 // silently invented.
 const DefaultExtractedImportance = 0.5
 
+// TripleOutcome pairs an extracted triple with what storeExtractedTriples
+// actually did with it. Both existing callers (ProcessLiveMessage,
+// ImportWhatsApp) previously discarded storeExtractedTriples' return
+// value entirely — surfacing this detail changes neither caller's
+// behavior, it only makes already-happening decisions observable. Added
+// for the Phase 0 dry-run tooling (cmd/phase0_dryrun), which needs
+// reinforcement-vs-new-edge counts and per-triple provenance for its
+// report; kept here rather than in a dry-run-only wrapper because any
+// real caller benefits from knowing this (e.g. a production import
+// wanting the same progress/stats reporting), and because there is no
+// other way to observe it without either a special-cased dry-run code
+// path (which this issue's own instructions forbid) or fragile
+// after-the-fact DB diffing.
+type TripleOutcome struct {
+	Triple extraction.ExtractedTriple
+	// Edge is the edge this triple resulted in — the created, reinforced,
+	// or corrected(new) edge — or nil if Action is
+	// TripleActionSkippedNoCorrectionTarget.
+	Edge   *memory.Edge
+	Action TripleAction
+}
+
+// TripleAction is the specific thing storeExtractedTriples did for one
+// triple.
+type TripleAction string
+
+const (
+	TripleActionCreated                   TripleAction = "created"
+	TripleActionReinforced                TripleAction = "reinforced"
+	TripleActionCorrected                 TripleAction = "corrected"
+	TripleActionSkippedNoCorrectionTarget TripleAction = "skipped_no_correction_target"
+)
+
 // storeExtractedTriples resolves entities, applies source weighting,
 // checks for reinforcement-vs-new, and writes/reinforces edges for
 // triples extracted from sourceMessageIDs, attributed to sourceType. This
@@ -140,17 +173,18 @@ const DefaultExtractedImportance = 0.5
 // field exists at all (this issue's minimal extension to extraction's
 // output shape, not a second classifier). CorrectMemory needs an existing
 // edge to supersede; if FindMatchingEdge finds no current edge for this
-// (subject, predicate) to correct, the triple is skipped (logged) rather
-// than either fabricating a "corrected" edge with nothing to supersede or
-// silently falling back to a normal Create, which would misrepresent an
-// explicit correction signal as an ordinary new fact.
-func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.ExtractedTriple, sourceType string, sourceMessageIDs []uuid.UUID, now time.Time) ([]*memory.Edge, error) {
-	var written []*memory.Edge
+// (subject, predicate) to correct, the triple is skipped
+// (TripleActionSkippedNoCorrectionTarget) rather than either fabricating
+// a "corrected" edge with nothing to supersede or silently falling back
+// to a normal Create, which would misrepresent an explicit correction
+// signal as an ordinary new fact.
+func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.ExtractedTriple, sourceType string, sourceMessageIDs []uuid.UUID, now time.Time) ([]TripleOutcome, error) {
+	var outcomes []TripleOutcome
 
 	for _, triple := range triples {
 		subject, err := a.resolveEntity(ctx, triple.Subject, "person")
 		if err != nil {
-			return written, fmt.Errorf("resolve subject %q: %w", triple.Subject, err)
+			return outcomes, fmt.Errorf("resolve subject %q: %w", triple.Subject, err)
 		}
 
 		var objectID *uuid.UUID
@@ -158,7 +192,7 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 		if triple.ObjectType == "entity" {
 			obj, err := a.resolveEntity(ctx, triple.Object, objectEntityTypeForPredicate(triple.Predicate))
 			if err != nil {
-				return written, fmt.Errorf("resolve object %q: %w", triple.Object, err)
+				return outcomes, fmt.Errorf("resolve object %q: %w", triple.Object, err)
 			}
 			objectID = &obj.ID
 		} else {
@@ -169,11 +203,12 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 		if triple.IsCorrection {
 			existing, err := a.edges.FindMatchingEdge(ctx, subject.ID, triple.Predicate, objectID, objectLiteral)
 			if err != nil {
-				return written, fmt.Errorf("find edge to correct (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+				return outcomes, fmt.Errorf("find edge to correct (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 			}
 			if existing == nil {
 				// Nothing to supersede — see this function's doc comment
 				// for why this is a skip, not a fallback to Create.
+				outcomes = append(outcomes, TripleOutcome{Triple: triple, Action: TripleActionSkippedNoCorrectionTarget})
 				continue
 			}
 
@@ -185,27 +220,27 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 				SourceMessageIDs: sourceMessageIDs,
 			})
 			if err != nil {
-				return written, fmt.Errorf("correct edge %s: %w", existing.ID, err)
+				return outcomes, fmt.Errorf("correct edge %s: %w", existing.ID, err)
 			}
-			written = append(written, corrected)
+			outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: corrected, Action: TripleActionCorrected})
 			continue
 		}
 
 		existing, err := a.edges.FindMatchingEdge(ctx, subject.ID, triple.Predicate, objectID, objectLiteral)
 		if err != nil {
-			return written, fmt.Errorf("find matching edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+			return outcomes, fmt.Errorf("find matching edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 		}
 		if existing != nil {
 			if err := a.edges.Reinforce(ctx, existing.ID, now); err != nil {
-				return written, fmt.Errorf("reinforce edge %s: %w", existing.ID, err)
+				return outcomes, fmt.Errorf("reinforce edge %s: %w", existing.ID, err)
 			}
-			written = append(written, existing)
+			outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: existing, Action: TripleActionReinforced})
 			continue
 		}
 
 		confidence, err := memory.ApplySourceWeight(triple.Confidence, sourceType)
 		if err != nil {
-			return written, fmt.Errorf("apply source weight (source_type=%q): %w", sourceType, err)
+			return outcomes, fmt.Errorf("apply source weight (source_type=%q): %w", sourceType, err)
 		}
 
 		edge := &memory.Edge{
@@ -221,10 +256,10 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			DecayRate:        memory.DefaultDecayRate(triple.Predicate),
 		}
 		if err := a.edges.Create(ctx, edge); err != nil {
-			return written, fmt.Errorf("create edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+			return outcomes, fmt.Errorf("create edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 		}
-		written = append(written, edge)
+		outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: edge, Action: TripleActionCreated})
 	}
 
-	return written, nil
+	return outcomes, nil
 }
