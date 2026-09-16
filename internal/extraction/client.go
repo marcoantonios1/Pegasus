@@ -142,20 +142,34 @@ func (c *CostguardClient) Embed(ctx context.Context, text string) ([]float32, er
 // gateway and returns the model's raw text response. Temperature is low
 // but non-zero: this is structured extraction, not creative generation, so
 // deterministic-leaning output is what strict JSON adherence needs.
+//
+// A thin wrapper over CompleteWithModel pinned to Model (qwen3-coder:30b)
+// — every existing call site (Extractor.ExtractWindow) keeps working
+// unchanged. CompleteWithModel itself exists for Triager (triage.go),
+// which needs a second, distinct model (llama3.2:3b, §5's Pass 1) through
+// this same Costguard gateway.
 func (c *CostguardClient) Complete(ctx context.Context, prompt string) (string, error) {
+	return c.CompleteWithModel(ctx, Model, prompt)
+}
+
+// CompleteWithModel is Complete generalized to a caller-chosen model. See
+// Complete's doc comment for why this exists as a separate method rather
+// than adding a model parameter to Complete itself (signature stability
+// for existing callers).
+func (c *CostguardClient) CompleteWithModel(ctx context.Context, model, prompt string) (string, error) {
 	reqBody := chatCompletionRequest{
-		Model:       Model,
+		Model:       model,
 		Messages:    []chatMessage{{Role: "user", Content: prompt}},
 		Temperature: 0.1,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal extraction request: %w", err)
+		return "", fmt.Errorf("marshal chat completion request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build extraction request: %w", err)
+		return "", fmt.Errorf("build chat completion request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.Agent != "" {
