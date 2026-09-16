@@ -49,6 +49,37 @@ func (s *EntityStore) GetByID(ctx context.Context, id uuid.UUID) (*Entity, error
 	return &e, nil
 }
 
+// GetByIDs returns every entity in ids, in no particular order — used by
+// WhyDoWeBelieveThis (internal/api, proposal §12) to resolve message
+// sender_ids to canonical_name for the "Mentioned by" breakdown. Returns
+// an empty slice, not an error, for an empty or nil ids.
+func (s *EntityStore) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*Entity, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, type, canonical_name, is_self, metadata, created_at, updated_at
+		FROM entities
+		WHERE id = ANY($1)
+	`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []*Entity
+	for rows.Next() {
+		var e Entity
+		if err := rows.Scan(&e.ID, &e.Type, &e.CanonicalName, &e.IsSelf, &e.Metadata, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		entities = append(entities, &e)
+	}
+
+	return entities, rows.Err()
+}
+
 func (s *EntityStore) Update(ctx context.Context, e *Entity) error {
 	if e.Metadata == nil {
 		e.Metadata = map[string]any{}
