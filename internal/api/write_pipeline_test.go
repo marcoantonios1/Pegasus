@@ -169,8 +169,18 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 		return extraction.ExtractedTriple{Subject: subject, Predicate: "likes", Object: "chess", ObjectType: "literal", Confidence: 0.77}
 	}
 
+	// Unique per test run, same reasoning as randomBasisIndex (api_test.go):
+	// this suite runs against a real, persistent, shared local dev
+	// database with no per-test reset. A fixed subject name would collide
+	// with a leftover entity/edge from an earlier run of this same test,
+	// turning "created" into "reinforced" and breaking the exact
+	// Action assertions below.
+	runID := uuid.New().String()
+	bulkSubjectName := "Bulk Contact " + runID
+	liveSubjectName := "Live Contact " + runID
+
 	// --- Bulk path ---
-	bulkExtractor := &fakeExtractor{triples: []extraction.ExtractedTriple{tripleTemplate("Bulk Contact")}}
+	bulkExtractor := &fakeExtractor{triples: []extraction.ExtractedTriple{tripleTemplate(bulkSubjectName)}}
 	bulkTriager := &fakeTriager{candidate: true}
 	bulkAPI := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: bulkTriager, Extractor: bulkExtractor,
@@ -186,15 +196,25 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 		t.Fatalf("write export file: %v", err)
 	}
 
-	if err := bulkAPI.ImportWhatsApp(ctx, exportPath); err != nil {
+	importResult, err := bulkAPI.ImportWhatsApp(ctx, exportPath)
+	if err != nil {
 		t.Fatalf("ImportWhatsApp: %v", err)
 	}
 	if bulkExtractor.calls != 1 {
 		t.Fatalf("expected bulk extraction called exactly once for one 8-message window, got %d", bulkExtractor.calls)
 	}
+	if importResult.MessagesParsed != extraction.DefaultHistoricalWindowSize {
+		t.Errorf("expected MessagesParsed=%d, got %d", extraction.DefaultHistoricalWindowSize, importResult.MessagesParsed)
+	}
+	if len(importResult.Windows) != 1 || !importResult.Windows[0].IsCandidate {
+		t.Fatalf("expected exactly 1 candidate window in the result, got %+v", importResult.Windows)
+	}
+	if len(importResult.Windows[0].Outcomes) != 1 || importResult.Windows[0].Outcomes[0].Action != TripleActionCreated {
+		t.Errorf("expected 1 created-triple outcome, got %+v", importResult.Windows[0].Outcomes)
+	}
 
 	// --- Live path, equivalent content ---
-	liveExtractor := &fakeExtractor{triples: []extraction.ExtractedTriple{tripleTemplate("Live Contact")}}
+	liveExtractor := &fakeExtractor{triples: []extraction.ExtractedTriple{tripleTemplate(liveSubjectName)}}
 	liveTriager := &fakeTriager{candidate: true}
 	liveAPI := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: liveTriager, Extractor: liveExtractor,
@@ -227,11 +247,11 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 	}
 
 	// --- Compare ---
-	bulkSubject, err := ts.entities.GetByCanonicalName(ctx, "Bulk Contact")
+	bulkSubject, err := ts.entities.GetByCanonicalName(ctx, bulkSubjectName)
 	if err != nil || bulkSubject == nil {
 		t.Fatalf("bulk subject entity not found: err=%v", err)
 	}
-	liveSubject, err := ts.entities.GetByCanonicalName(ctx, "Live Contact")
+	liveSubject, err := ts.entities.GetByCanonicalName(ctx, liveSubjectName)
 	if err != nil || liveSubject == nil {
 		t.Fatalf("live subject entity not found: err=%v", err)
 	}
