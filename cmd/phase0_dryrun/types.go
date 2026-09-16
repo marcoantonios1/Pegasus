@@ -53,4 +53,13 @@ type UsageRow struct {
 	CompletionTokens int
 	TotalTokens      int
 	EstimatedCostUSD float64
+	// PriceFoundCount is how many of RequestCount had Costguard's own
+	// price_found=true — i.e. it actually had a configured price to
+	// compute EstimatedCostUSD from, vs. defaulting to 0 because it had
+	// no price data at all for that model. PriceFoundCount < RequestCount
+	// means EstimatedCostUSD is an UNDERCOUNT, not a confirmed number —
+	// see queryCostguardUsage's own doc comment. Real, not hypothetical:
+	// this dry-run's own local Ollama models (llama3.2:3b, qwen3-coder:30b)
+	// came back price_found=false on every row.
+	PriceFoundCount int
 }

@@ -97,11 +97,12 @@ func writeCostAndTiming(b *strings.Builder, runs []RunResult, totalMonths float6
 	b.WriteString("---\n\n## Cost and timing\n\n")
 
 	type modelTotals struct {
-		requests, promptTokens, completionTokens, totalTokens int
-		costUSD                                               float64
+		requests, promptTokens, completionTokens, totalTokens, priceFound int
+		costUSD                                                           float64
 	}
 	byModel := map[string]*modelTotals{}
 	var totalCost float64
+	var totalRequests, totalPriceFound int
 	var totalDuration time.Duration
 
 	for _, r := range runs {
@@ -119,7 +120,10 @@ func writeCostAndTiming(b *strings.Builder, runs []RunResult, totalMonths float6
 			mt.completionTokens += u.CompletionTokens
 			mt.totalTokens += u.TotalTokens
 			mt.costUSD += u.EstimatedCostUSD
+			mt.priceFound += u.PriceFoundCount
 			totalCost += u.EstimatedCostUSD
+			totalRequests += u.RequestCount
+			totalPriceFound += u.PriceFoundCount
 		}
 	}
 
@@ -127,6 +131,15 @@ func writeCostAndTiming(b *strings.Builder, runs []RunResult, totalMonths float6
 		b.WriteString("**No Costguard usage data captured.** Either the usage query failed (check `run`'s stderr ")
 		b.WriteString("output for a WARNING line) or Costguard's usage_records table genuinely has no rows for this ")
 		b.WriteString("run's agent/time window. Cost figures below are all zero and NOT meaningful until this is fixed.\n\n")
+	} else if totalPriceFound < totalRequests {
+		fmt.Fprintf(b, "**%d of %d requests had no Costguard price configured (price_found=false).** For those, ",
+			totalRequests-totalPriceFound, totalRequests)
+		b.WriteString("estimated_cost_usd defaults to 0 — that means **UNMEASURED, not confirmed free.** Local, ")
+		b.WriteString("self-hosted models (Ollama) genuinely may have zero marginal API cost, but this tool cannot ")
+		b.WriteString("tell the difference between \"actually free\" and \"Costguard has no price entry for this model\" ")
+		b.WriteString("from usage_records alone — see the Price found column below per model. If the true per-token ")
+		b.WriteString("cost matters for the go/no-go decision (e.g. this ever moves to a metered API), configure ")
+		b.WriteString("pricing for these models in Costguard before trusting the total below.\n\n")
 	}
 
 	models := make([]string, 0, len(byModel))
@@ -135,13 +148,13 @@ func writeCostAndTiming(b *strings.Builder, runs []RunResult, totalMonths float6
 	}
 	sort.Strings(models)
 
-	b.WriteString("| Model | Requests | Prompt tokens | Completion tokens | Total tokens | Cost (USD) |\n")
-	b.WriteString("|---|---|---|---|---|---|\n")
+	b.WriteString("| Model | Requests | Prompt tokens | Completion tokens | Total tokens | Cost (USD) | Price found |\n")
+	b.WriteString("|---|---|---|---|---|---|---|\n")
 	for _, m := range models {
 		mt := byModel[m]
-		fmt.Fprintf(b, "| %s | %d | %d | %d | %d | $%.4f |\n", m, mt.requests, mt.promptTokens, mt.completionTokens, mt.totalTokens, mt.costUSD)
+		fmt.Fprintf(b, "| %s | %d | %d | %d | %d | $%.4f | %d/%d |\n", m, mt.requests, mt.promptTokens, mt.completionTokens, mt.totalTokens, mt.costUSD, mt.priceFound, mt.requests)
 	}
-	fmt.Fprintf(b, "| **Total** | | | | | **$%.4f** |\n\n", totalCost)
+	fmt.Fprintf(b, "| **Total** | | | | | **$%.4f** | %d/%d |\n\n", totalCost, totalPriceFound, totalRequests)
 
 	b.WriteString("**Not captured by this run, and NOT in the totals above** — both are known gaps in the write ")
 	b.WriteString("pipeline as built, not something this dry-run's cost figure secretly includes:\n")

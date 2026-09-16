@@ -154,10 +154,19 @@ func queryCostguardUsage(ctx context.Context, dsn, agent string, from, to time.T
 		return nil, fmt.Errorf("ping Costguard db: %w", err)
 	}
 
+	// price_found is counted explicitly (not just averaged into
+	// estimated_cost_usd) because a false price_found row doesn't mean
+	// "confirmed $0 cost" — it means Costguard had no price configured
+	// for that model and defaulted the cost to 0. Silently reporting
+	// $0.00 in that case would misrepresent "unmeasured" as "measured and
+	// free". Confirmed this isn't a hypothetical: this tool's own local
+	// Ollama models (llama3.2:3b, qwen3-coder:30b) came back
+	// price_found=false on every row during development.
 	rows, err := pool.Query(ctx, `
 		SELECT model, path, count(*),
 			COALESCE(sum(prompt_tokens), 0), COALESCE(sum(completion_tokens), 0),
-			COALESCE(sum(total_tokens), 0), COALESCE(sum(estimated_cost_usd), 0)
+			COALESCE(sum(total_tokens), 0), COALESCE(sum(estimated_cost_usd), 0),
+			count(*) FILTER (WHERE price_found)
 		FROM usage_records
 		WHERE agent = $1 AND timestamp_utc >= $2 AND timestamp_utc < $3
 		GROUP BY model, path
@@ -171,7 +180,7 @@ func queryCostguardUsage(ctx context.Context, dsn, agent string, from, to time.T
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.Model, &r.Path, &r.RequestCount, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.EstimatedCostUSD); err != nil {
+		if err := rows.Scan(&r.Model, &r.Path, &r.RequestCount, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.EstimatedCostUSD, &r.PriceFoundCount); err != nil {
 			return nil, fmt.Errorf("scan usage row: %w", err)
 		}
 		out = append(out, r)
