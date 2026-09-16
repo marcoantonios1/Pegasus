@@ -46,10 +46,11 @@ Conversation:
 {{range .Messages}}[{{.Timestamp.Format "2006-01-02 15:04:05"}}] {{.Speaker}}: {{.Text}}
 {{end}}
 Output ONLY a JSON array, no prose, no markdown code fences, no explanation before or after it. Each item must have exactly these fields:
-{"subject": string, "predicate": string, "object": string, "object_type": "entity" | "literal", "confidence": number between 0 and 1}
+{"subject": string, "predicate": string, "object": string, "object_type": "entity" | "literal", "confidence": number between 0 and 1, "is_correction": true | false}
 
 "predicate" must be exactly one of the allowed predicate names listed above.
 "object_type" is "entity" if object refers to a person/place/thing that could itself be a subject elsewhere, "literal" for a plain value (a food, a city name used only as a value, a nickname string, etc.).
+"is_correction" is true only when the speaker is explicitly correcting or retracting something they or someone else previously stated as fact (e.g. "actually, that's wrong, I moved to Beirut last month, not Dubai" or "no, my birthday is in March, not April") — not for a new fact, an update to an ongoing situation stated as new information, or a simple change of mind about a future plan. When in doubt, use false: a missed correction still gets written as a new fact and can be corrected later, but a false positive here would route an ordinary fact through the wrong storage path.
 
 For event_past / event_present / event_future specifically: classify the tense relative to the TIMESTAMP OF THE MESSAGE that mentions the event, not relative to today's date. A message timestamped two years ago saying "next week" describes an event_future relative to that message's own timestamp — it happened in the past from today's perspective, but it was a future plan at the moment it was said, and that is what determines the predicate. Do not use today's date to decide event tense.
 If an event's tense is genuinely unclear or ambiguous from the phrasing, use event_present rather than guessing event_past or event_future — event_present is the safest default since it does not trigger a hard-expiry rule the way a wrongly-guessed event_future would.
