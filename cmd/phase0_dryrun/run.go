@@ -72,9 +72,14 @@ func runRun(args []string) error {
 		memory.NewRelationshipStatsStore(pegasusPool),
 		client,
 	).WithPipeline(api.PipelineDeps{
-		Triager:   triager,
-		Extractor: extractor,
-		Logger:    log.Printf,
+		Triager:     triager,
+		Extractor:   extractor,
+		Logger:      log.Printf,
+		Transcriber: client,
+		// No AudioFetcher here: ImportWhatsApp always builds its own,
+		// scoped to *exportPath's directory (see
+		// internal/api/import_whatsapp.go's localExportAudioFetcher) — a
+		// dry-run-specific one would just duplicate that.
 	})
 
 	// Margin around the run's actual [start, end) so Costguard's own

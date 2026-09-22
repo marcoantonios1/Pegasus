@@ -155,6 +155,17 @@ const transcriptionTimeout = 5 * time.Minute
 //     Speaches doesn't need it, but applying it unconditionally means
 //     one code path instead of two, and it's provably harmless for
 //     Speaches (same bytes, a filename it doesn't care about).
+//
+//     .mp4 and .ogg need no equivalent rename: OpenAI's own rejection
+//     message (NOTES.md) lists its full supported-extension set —
+//     ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav',
+//     'webm'] — and both are already on it. This matters for Instagram
+//     specifically: sent voice notes export as raw .mp4 containers
+//     (NOTES.md), received ones as .ogg, and internal/ingestion/instagram
+//     classifies audio via the export JSON's structured audio_files
+//     field, not by sniffing the extension, so the container format
+//     reaching this method is whatever Instagram's export produced —
+//     confirmed already-safe here, not just assumed.
 //   - Retry-on-502, below: the local Speaches instance unloads its model
 //     after 300s idle, and the first request after idle-unload doesn't
 //     just reload the model — the whole container process restarts, and

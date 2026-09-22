@@ -207,23 +207,31 @@ func (a *API) transcribeVoiceMessage(ctx context.Context, msgID uuid.UUID, audio
 	return escalatedResp.Text, escalatedResp.MeanSegmentAvgLogprob(), true
 }
 
-// transcribeAndStore fetches msg's audio (via AudioFetcher, keyed by
-// mediaRef) and transcribes it (transcribeVoiceMessage), persisting the
-// result onto msg (transcript + transcript_confidence) before returning
-// the transcript text for the caller to feed into the SAME triage/
-// extraction path a text message would use (requirement 5 — no divergent
-// extraction logic for voice-derived text).
+// transcribeAndStore fetches msg's audio (via fetcher, keyed by mediaRef)
+// and transcribes it (transcribeVoiceMessage), persisting the result onto
+// msg (transcript + transcript_confidence) before returning the
+// transcript text for the caller to feed into the SAME triage/extraction
+// path a text message would use (requirement 5 — no divergent extraction
+// logic for voice-derived text).
+//
+// fetcher is passed explicitly rather than always reading a.audioFetcher
+// — ImportWhatsApp always has one (a locally-scoped fetcher over the
+// export's own directory, built fresh per call since it depends on that
+// specific export's path) where ProcessLiveMessage may not (a.audioFetcher,
+// possibly nil — see AudioFetcher's own doc comment for why a live one
+// isn't built here). A shared *API struct field would force either
+// mutating it per ImportWhatsApp call (unsafe if ever called concurrently
+// on the same *API) or a second field just for this — passing it as a
+// parameter avoids both.
 //
 // Returns ok=false — logged via a.logf with the message ID, never
-// silent — if there's no way to get audio bytes at all (AudioFetcher nil
-// or mediaRef nil — see AudioFetcher's own doc comment for when a nil
-// fetcher is expected, not a bug) or if transcription failed entirely.
-// This function never marks msg processed either way — msg.Processed is
-// the caller's decision once it knows whether there's anything further
-// to attempt (see resolveTextForTriage / ProcessLiveMessage /
-// ImportWhatsApp).
-func (a *API) transcribeAndStore(ctx context.Context, msg *memory.Message, mediaRef *string) (string, bool) {
-	if a.audioFetcher == nil {
+// silent — if there's no way to get audio bytes at all (fetcher nil or
+// mediaRef nil) or if transcription failed entirely. This function never
+// marks msg processed either way — msg.Processed is the caller's decision
+// once it knows whether there's anything further to attempt (see
+// resolveTextForTriage / ProcessLiveMessage / ImportWhatsApp).
+func (a *API) transcribeAndStore(ctx context.Context, msg *memory.Message, mediaRef *string, fetcher AudioFetcher) (string, bool) {
+	if fetcher == nil {
 		a.logf("transcribeAndStore: no AudioFetcher configured, message %s stays untranscribed", msg.ID)
 		return "", false
 	}
@@ -232,7 +240,7 @@ func (a *API) transcribeAndStore(ctx context.Context, msg *memory.Message, media
 		return "", false
 	}
 
-	audio, err := a.audioFetcher(ctx, *mediaRef)
+	audio, err := fetcher(ctx, *mediaRef)
 	if err != nil {
 		a.logf("transcribeAndStore: fetch audio for message %s (%s): %v", msg.ID, *mediaRef, err)
 		return "", false
