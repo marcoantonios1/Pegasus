@@ -29,6 +29,14 @@ type CostguardClient struct {
 	Agent string
 
 	HTTPClient *http.Client
+
+	// TranscriptionRetryBackoff overrides Transcribe's one-retry-on-502
+	// backoff (see DefaultTranscriptionRetryBackoff's own doc comment for
+	// why the real default is 30s, not a short guess). Zero uses the
+	// default — a field rather than a package const specifically so tests
+	// can inject a short backoff instead of a real test run needing to
+	// wait out 30s per retry case.
+	TranscriptionRetryBackoff time.Duration
 }
 
 func NewCostguardClient(baseURL string) *CostguardClient {
