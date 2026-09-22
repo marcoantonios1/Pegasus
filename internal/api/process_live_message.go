@@ -26,17 +26,48 @@ type liveConversationState struct {
 }
 
 // sourceTypeForRawMessage maps a live RawMessage to the source_type its
-// resulting edges should carry (a memory.SourceWeights key). Only
-// whatsapp/text is mapped today because that's the only live adapter
-// that exists (internal/ingestion/whatsapp/live.go) — extend this switch
-// when a new live adapter is added, rather than defaulting silently to a
-// guessed source_type for a platform this pipeline has never seen,
-// matching ApplySourceWeight's own "fail loud on unmapped" precedent.
+// resulting edges should carry (a memory.SourceWeights key). whatsapp/
+// text and whatsapp/voice are mapped — voice via
+// memory.SourceTypeVoiceTranscript once transcribed, since from that
+// point on it's feeding the same triage/extraction path text does (see
+// resolveTextForTriage) and needs its own source_weight (§7.5) rather
+// than inheriting text's. Extend this switch when a new live adapter is
+// added, rather than defaulting silently to a guessed source_type for a
+// platform this pipeline has never seen, matching ApplySourceWeight's own
+// "fail loud on unmapped" precedent.
 func sourceTypeForRawMessage(rawMsg ingestion.RawMessage) (string, error) {
-	if rawMsg.Platform == "whatsapp" && rawMsg.MediaType == ingestion.MediaTypeText {
-		return memory.SourceTypeWhatsAppText, nil
+	if rawMsg.Platform == "whatsapp" {
+		switch rawMsg.MediaType {
+		case ingestion.MediaTypeText:
+			return memory.SourceTypeWhatsAppText, nil
+		case ingestion.MediaTypeVoice:
+			return memory.SourceTypeVoiceTranscript, nil
+		}
 	}
 	return "", fmt.Errorf("no source_type mapping for platform=%q media_type=%q", rawMsg.Platform, rawMsg.MediaType)
+}
+
+// resolveTextForTriage returns the text a raw message should be triaged/
+// windowed with, and whether there is any (a message with neither text
+// nor a successful transcription has nothing to feed the rest of the
+// pipeline). For MediaTypeVoice, this is the stage that must complete
+// BEFORE triage — a voice message has no text to triage until it's
+// transcribed (requirement 5) — via transcribeAndStore, which also
+// persists the transcript/confidence onto msg. Image/video have no
+// extraction path (no captioning/vision pipeline wired in anywhere) and
+// always return ok=false, unchanged from before this issue.
+func (a *API) resolveTextForTriage(ctx context.Context, msg *memory.Message, rawMsg ingestion.RawMessage) (string, bool) {
+	switch rawMsg.MediaType {
+	case ingestion.MediaTypeText:
+		if rawMsg.Text == nil {
+			return "", false
+		}
+		return *rawMsg.Text, true
+	case ingestion.MediaTypeVoice:
+		return a.transcribeAndStore(ctx, msg, rawMsg.MediaURL)
+	default:
+		return "", false
+	}
 }
 
 // ProcessLiveMessage implements proposal §13/§5's live pipeline for one
@@ -65,13 +96,24 @@ func sourceTypeForRawMessage(rawMsg ingestion.RawMessage) (string, error) {
 // a downstream triage/extraction failure doesn't retroactively make the
 // activity not have happened.
 //
-// Media types other than text (voice, image, video) are stored but not
-// triaged/extracted: voice/image only gain extractable text after
-// transcription/vision description (§8.4), a separate pipeline stage not
-// wired in anywhere yet — the same limitation internal/bulkimport's
-// historical path already documents, for the same reason. Such messages
-// are marked processed=true immediately, since there is nothing further
-// this pipeline can do for them today.
+// Media types: text is triaged directly. Voice is transcribed first
+// (resolveTextForTriage -> transcribeAndStore), THEN triaged/windowed
+// exactly like text — requirement 5, no divergent extraction logic for
+// voice-derived text. Image/video have no extraction path (no
+// captioning/vision pipeline wired in anywhere) and are stored but not
+// triaged/extracted, marked processed=true immediately since there is
+// nothing further this pipeline can do for them today.
+//
+// A voice message that fails transcription entirely (resolveTextForTriage
+// returns ok=false — logged inside transcribeAndStore/
+// transcribeVoiceMessage with the message ID either way, never silently)
+// is NOT marked processed: it's already stored (msg.Processed defaults to
+// false at creation, below), so it stays discoverable and re-attemptable
+// rather than either disappearing from the graph with no trace or
+// aborting this whole call over one bad audio file. This is the fix for
+// the bug this issue's own instructions named explicitly: voice messages
+// used to be marked processed=true immediately, with no transcription
+// attempt at all — see the old media-type branch this replaced.
 func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessage) error {
 	if a.triager == nil || a.extractor == nil {
 		return fmt.Errorf("ProcessLiveMessage: API has no Triager/Extractor configured — call WithPipeline first")
@@ -98,16 +140,27 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 	}
 
 	// Storage succeeded: live activity genuinely happened, regardless of
-	// what triage/extraction does next.
+	// what transcription/triage/extraction does next.
 	if a.activityRecorder != nil {
 		a.activityRecorder.RecordActivity()
 	}
 
-	if rawMsg.MediaType != ingestion.MediaTypeText || rawMsg.Text == nil {
+	if rawMsg.MediaType != ingestion.MediaTypeText && rawMsg.MediaType != ingestion.MediaTypeVoice {
 		return a.messages.MarkProcessed(ctx, msg.ID)
 	}
 
-	isCandidate, err := a.triager.IsCandidate(ctx, *rawMsg.Text)
+	text, ok := a.resolveTextForTriage(ctx, msg, rawMsg)
+	if !ok {
+		// Text: genuinely empty (rawMsg.Text == nil) — nothing to do,
+		// same as before. Voice: transcription failed entirely — leave
+		// unprocessed/discoverable, see this function's own doc comment.
+		if rawMsg.MediaType == ingestion.MediaTypeVoice {
+			return nil
+		}
+		return a.messages.MarkProcessed(ctx, msg.ID)
+	}
+
+	isCandidate, err := a.triager.IsCandidate(ctx, text)
 	if err != nil {
 		return fmt.Errorf("ProcessLiveMessage: triage: %w", err)
 	}
