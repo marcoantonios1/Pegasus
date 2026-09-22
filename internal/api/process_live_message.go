@@ -17,34 +17,56 @@ import (
 // messages. extraction.LiveWindower carries extraction.WindowMessage
 // values only (Speaker/Timestamp/Text, deliberately no ID field — see its
 // own doc comment on why extraction stays decoupled from storage), so
-// this parallel slice is how ProcessLiveMessage later knows which stored
-// message rows to mark processed and attribute SourceMessageIDs to once
-// a window completes.
+// these two parallel slices are how ProcessLiveMessage later knows which
+// stored message rows to mark processed/attribute SourceMessageIDs to,
+// and what source_type the completed window should carry, once it closes.
 type liveConversationState struct {
-	windower   *extraction.LiveWindower
-	pendingIDs []uuid.UUID
+	windower          *extraction.LiveWindower
+	pendingIDs        []uuid.UUID
+	pendingMediaTypes []string
 }
 
-// sourceTypeForRawMessage maps a live RawMessage to the source_type its
-// resulting edges should carry (a memory.SourceWeights key). whatsapp/
-// text and whatsapp/voice are mapped — voice via
-// memory.SourceTypeVoiceTranscript once transcribed, since from that
-// point on it's feeding the same triage/extraction path text does (see
-// resolveTextForTriage) and needs its own source_weight (§7.5) rather
-// than inheriting text's. Extend this switch when a new live adapter is
-// added, rather than defaulting silently to a guessed source_type for a
-// platform this pipeline has never seen, matching ApplySourceWeight's own
-// "fail loud on unmapped" precedent.
-func sourceTypeForRawMessage(rawMsg ingestion.RawMessage) (string, error) {
-	if rawMsg.Platform == "whatsapp" {
-		switch rawMsg.MediaType {
-		case ingestion.MediaTypeText:
-			return memory.SourceTypeWhatsAppText, nil
+// windowSourceType derives the single source_type a whole window's worth
+// of messages should be stored under — storeExtractedTriples takes one
+// sourceType per call, not one per message, but a window (live or
+// historical) can legitimately mix text and voice-transcribed messages
+// (e.g. a text reply to a voice note landing in the same window). Rather
+// than guess or silently pick one arbitrarily, this takes the LOWER-trust
+// type whenever ANY message in the window came through transcription:
+// SourceWeights scores voice_transcript at 0.95 vs. whatsapp_text's 1.0
+// (source_weights.go), so "any voice in the window -> voice_transcript"
+// is the conservative choice, not an arbitrary one — it never overstates
+// trust for a window part of whose content passed through a transcription
+// step. An unrecognized media_type fails loudly rather than defaulting,
+// matching ApplySourceWeight's own "fail loud on unmapped" precedent.
+//
+// Replaces an earlier, buggier design (sourceTypeForRawMessage, computed
+// once from whichever message happened to be CURRENTLY arriving) that
+// this issue's own review caught: per extraction.LiveWindower.Add's
+// contract, the message that triggers a window's closure starts the NEXT
+// window and is NOT a member of the one that just closed — so the old
+// code was tagging a completed window's source_type using a message that
+// wasn't even in it. That was invisible while every message was text
+// (the answer was always whatsapp_text either way), but would have
+// silently mis-tagged real voice-containing windows the moment voice
+// started flowing through this same path.
+func windowSourceType(mediaTypes []string) (string, error) {
+	sawVoice := false
+	for _, mt := range mediaTypes {
+		switch mt {
 		case ingestion.MediaTypeVoice:
-			return memory.SourceTypeVoiceTranscript, nil
+			sawVoice = true
+		case ingestion.MediaTypeText:
+			// no-op — whatsapp_text unless a voice message elsewhere in
+			// the window overrides it.
+		default:
+			return "", fmt.Errorf("windowSourceType: unexpected media_type %q in a windowed message", mt)
 		}
 	}
-	return "", fmt.Errorf("no source_type mapping for platform=%q media_type=%q", rawMsg.Platform, rawMsg.MediaType)
+	if sawVoice {
+		return memory.SourceTypeVoiceTranscript, nil
+	}
+	return memory.SourceTypeWhatsAppText, nil
 }
 
 // resolveTextForTriage returns the text a raw message should be triaged/
@@ -168,11 +190,6 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		return a.messages.MarkProcessed(ctx, msg.ID)
 	}
 
-	sourceType, err := sourceTypeForRawMessage(rawMsg)
-	if err != nil {
-		return fmt.Errorf("ProcessLiveMessage: %w", err)
-	}
-
 	// Locked section is deliberately narrow: only the in-memory window
 	// state mutation, not the extraction call below. Extraction is a
 	// network round trip to Costguard — holding the lock through it would
@@ -193,20 +210,31 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 	wm := extraction.WindowMessage{Speaker: rawMsg.SenderExternalID, Timestamp: rawMsg.Timestamp, Text: text}
 	completed, ready := state.windower.Add(wm)
 	state.pendingIDs = append(state.pendingIDs, msg.ID)
+	state.pendingMediaTypes = append(state.pendingMediaTypes, rawMsg.MediaType)
 
 	var completedIDs []uuid.UUID
+	var completedMediaTypes []string
 	if ready {
 		// The message that just triggered closing the window starts the
 		// next one (extraction.LiveWindower.Add's contract), so it's the
-		// LAST element of pendingIDs here, not part of the just-completed
-		// window.
+		// LAST element of pendingIDs/pendingMediaTypes here, not part of
+		// the just-completed window — completedMediaTypes must reflect
+		// the CLOSED window's own messages, not this one (see
+		// windowSourceType's own doc comment for the bug this fixes).
 		completedIDs = state.pendingIDs[:len(state.pendingIDs)-1]
 		state.pendingIDs = state.pendingIDs[len(state.pendingIDs)-1:]
+		completedMediaTypes = state.pendingMediaTypes[:len(state.pendingMediaTypes)-1]
+		state.pendingMediaTypes = state.pendingMediaTypes[len(state.pendingMediaTypes)-1:]
 	}
 	a.liveWindowsMu.Unlock()
 
 	if !ready {
 		return nil // message stored; will be marked processed once its window completes
+	}
+
+	sourceType, err := windowSourceType(completedMediaTypes)
+	if err != nil {
+		return fmt.Errorf("ProcessLiveMessage: %w", err)
 	}
 
 	return a.processCompletedWindow(ctx, *completed, sourceType, completedIDs)
