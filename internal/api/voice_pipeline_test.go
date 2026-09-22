@@ -15,6 +15,238 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
+// --- windowSourceType: mixed-window source_type derivation ---
+//
+// storeExtractedTriples takes one source_type per window, but a window
+// can legitimately mix text and voice-transcribed messages — these tests
+// cover the bug this issue's own review caught: the live path used to
+// derive a completed window's source_type from whichever message
+// happened to be CURRENTLY ARRIVING (the one that triggers the window's
+// closure), which per extraction.LiveWindower.Add's contract is NOT a
+// member of the window that just closed. That was invisible while
+// everything was text; wiring voice in made it a real, silent
+// mis-tagging bug (see windowSourceType's own doc comment).
+
+func TestWindowSourceType(t *testing.T) {
+	tests := []struct {
+		name       string
+		mediaTypes []string
+		want       string
+		wantErr    bool
+	}{
+		{"all text", []string{"text", "text", "text"}, memory.SourceTypeWhatsAppText, false},
+		{"all voice", []string{"voice", "voice"}, memory.SourceTypeVoiceTranscript, false},
+		{"mixed, voice anywhere wins (conservative, lower trust weight)", []string{"text", "voice", "text"}, memory.SourceTypeVoiceTranscript, false},
+		{"empty", nil, memory.SourceTypeWhatsAppText, false},
+		{"unrecognized media_type fails loud", []string{"text", "image"}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := windowSourceType(tt.mediaTypes)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for media_types %v, got none", tt.mediaTypes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("windowSourceType(%v): %v", tt.mediaTypes, err)
+			}
+			if got != tt.want {
+				t.Errorf("windowSourceType(%v) = %q, want %q", tt.mediaTypes, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessLiveMessage_SourceTypeDerivedFromClosedWindowNotTriggeringMessage
+// directly reproduces the bug: messages 0-9 (the window that closes) are
+// all TEXT; message 10 (the trigger, which starts the NEXT window and is
+// NOT part of the closed one per LiveWindower.Add's contract) is VOICE.
+// The old buggy code derived source_type from message 10 and would have
+// tagged this all-text window voice_transcript; the fix must derive it
+// from the closed window's own messages (all text) instead.
+func TestProcessLiveMessage_SourceTypeDerivedFromClosedWindowNotTriggeringMessage(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
+		{resp: segResp("en", -0.1)}, // for the one voice message (the trigger, index 10)
+	}}
+	triager := &fakeTriager{candidate: true}
+	subjectName := "Trigger Bug Contact " + uuid.New().String()
+	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
+		{Subject: subjectName, Predicate: "likes", Object: "reading", ObjectType: "literal", Confidence: 0.8},
+	}}
+
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
+		Triager: triager, Extractor: extractor,
+		Transcriber:  transcriber,
+		AudioFetcher: fixedAudioFetcher([]byte("audio")),
+	})
+
+	conversationExternalID := "trigger-bug-conv-" + uuid.New().String()
+	senderExternalID := "trigger-bug-sender-" + uuid.New().String()
+	base := time.Now()
+	mediaRef := "trigger.opus"
+
+	for i := 0; i < 11; i++ {
+		raw := ingestion.RawMessage{
+			ExternalID: "tmsg-" + uuid.New().String(), Platform: "whatsapp",
+			ConversationID: conversationExternalID, SenderExternalID: senderExternalID,
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+		}
+		if i < 10 {
+			raw.MediaType = ingestion.MediaTypeText
+			raw.Text = textPtr("a text message")
+		} else {
+			raw.MediaType = ingestion.MediaTypeVoice
+			raw.MediaURL = &mediaRef
+		}
+		if err := a.ProcessLiveMessage(ctx, raw); err != nil {
+			t.Fatalf("ProcessLiveMessage(%d): %v", i, err)
+		}
+	}
+
+	subject, err := ts.entities.GetByCanonicalName(ctx, subjectName)
+	if err != nil || subject == nil {
+		t.Fatalf("expected subject entity to have been created, err=%v subject=%v", err, subject)
+	}
+	edges, err := ts.edges.GetBySubjectAndPredicate(ctx, subject.ID, "likes")
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("expected exactly 1 edge, got %d (err=%v)", len(edges), err)
+	}
+	if edges[0].SourceType != memory.SourceTypeWhatsAppText {
+		t.Errorf("expected source_type %q (derived from the all-text closed window), got %q — "+
+			"this means source_type is still being derived from the triggering message instead of the window's own contents",
+			memory.SourceTypeWhatsAppText, edges[0].SourceType)
+	}
+}
+
+// TestProcessLiveMessage_MixedWindowUsesVoiceTranscriptSourceType covers
+// windowSourceType's "any voice in the window wins" policy against the
+// real live path: one voice message among an otherwise-text window must
+// make the whole window's edges source_type=voice_transcript.
+func TestProcessLiveMessage_MixedWindowUsesVoiceTranscriptSourceType(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
+		{resp: segResp("en", -0.1)}, // for the single voice message at index 5
+	}}
+	triager := &fakeTriager{candidate: true}
+	subjectName := "Mixed Window Contact " + uuid.New().String()
+	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
+		{Subject: subjectName, Predicate: "likes", Object: "cycling", ObjectType: "literal", Confidence: 0.8},
+	}}
+
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
+		Triager: triager, Extractor: extractor,
+		Transcriber:  transcriber,
+		AudioFetcher: fixedAudioFetcher([]byte("audio")),
+	})
+
+	conversationExternalID := "mixed-conv-" + uuid.New().String()
+	senderExternalID := "mixed-sender-" + uuid.New().String()
+	base := time.Now()
+	mediaRef := "mixed-note.opus"
+
+	for i := 0; i < 11; i++ {
+		raw := ingestion.RawMessage{
+			ExternalID: "mmsg-" + uuid.New().String(), Platform: "whatsapp",
+			ConversationID: conversationExternalID, SenderExternalID: senderExternalID,
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+		}
+		if i == 5 {
+			raw.MediaType = ingestion.MediaTypeVoice
+			raw.MediaURL = &mediaRef
+		} else {
+			raw.MediaType = ingestion.MediaTypeText
+			raw.Text = textPtr("a text message")
+		}
+		if err := a.ProcessLiveMessage(ctx, raw); err != nil {
+			t.Fatalf("ProcessLiveMessage(%d): %v", i, err)
+		}
+	}
+
+	subject, err := ts.entities.GetByCanonicalName(ctx, subjectName)
+	if err != nil || subject == nil {
+		t.Fatalf("expected subject entity to have been created, err=%v subject=%v", err, subject)
+	}
+	edges, err := ts.edges.GetBySubjectAndPredicate(ctx, subject.ID, "likes")
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("expected exactly 1 edge, got %d (err=%v)", len(edges), err)
+	}
+	if edges[0].SourceType != memory.SourceTypeVoiceTranscript {
+		t.Errorf("expected source_type %q for a window containing one voice message, got %q",
+			memory.SourceTypeVoiceTranscript, edges[0].SourceType)
+	}
+}
+
+// TestImportWhatsApp_MixedTextAndVoiceWindow_UsesVoiceTranscriptSourceType
+// covers the same fix at the bulk path: a window built from an export
+// with interleaved text and voice entries must get source_type
+// voice_transcript, not the previously-hardcoded whatsapp_text.
+func TestImportWhatsApp_MixedTextAndVoiceWindow_UsesVoiceTranscriptSourceType(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	windowSize := extraction.DefaultHistoricalWindowSize
+	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
+		{resp: segResp("en", -0.1)}, // for the single voice entry in this window
+	}}
+	triager := &fakeTriager{candidate: true}
+	subjectName := "Bulk Mixed Contact " + uuid.New().String()
+	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
+		{Subject: subjectName, Predicate: "likes", Object: "running", ObjectType: "literal", Confidence: 0.7},
+	}}
+
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
+		Triager: triager, Extractor: extractor, Transcriber: transcriber,
+	})
+
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "BulkMixedConv.txt")
+
+	voiceFilename := "mixed-note.opus"
+	if err := os.WriteFile(filepath.Join(dir, voiceFilename), []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write sibling audio file: %v", err)
+	}
+
+	var export string
+	for i := 0; i < windowSize; i++ {
+		if i == 3 {
+			export += fmt.Sprintf("1/1/26, 9:0%d AM - John: %s (file attached)\n", i, voiceFilename)
+		} else {
+			export += fmt.Sprintf("1/1/26, 9:0%d AM - John: message %d\n", i, i)
+		}
+	}
+	if err := os.WriteFile(exportPath, []byte(export), 0o644); err != nil {
+		t.Fatalf("write export file: %v", err)
+	}
+
+	result, err := a.ImportWhatsApp(ctx, exportPath)
+	if err != nil {
+		t.Fatalf("ImportWhatsApp: %v", err)
+	}
+	if len(result.Windows) != 1 || len(result.Windows[0].Outcomes) != 1 {
+		t.Fatalf("expected exactly 1 window with 1 outcome, got %+v", result.Windows)
+	}
+
+	subject, err := ts.entities.GetByCanonicalName(ctx, subjectName)
+	if err != nil || subject == nil {
+		t.Fatalf("expected subject entity to have been created, err=%v subject=%v", err, subject)
+	}
+	edges, err := ts.edges.GetBySubjectAndPredicate(ctx, subject.ID, "likes")
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("expected exactly 1 edge, got %d (err=%v)", len(edges), err)
+	}
+	if edges[0].SourceType != memory.SourceTypeVoiceTranscript {
+		t.Errorf("expected source_type %q for a window containing one voice entry, got %q",
+			memory.SourceTypeVoiceTranscript, edges[0].SourceType)
+	}
+}
+
 // --- Requirement 8: full voice -> transcript -> triage -> extraction path ---
 
 // TestProcessLiveMessage_VoiceWindowTranscribedThenExtracted covers
