@@ -223,10 +223,11 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 
 		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: r.SenderExternalID, Timestamp: r.Timestamp, Text: text})
 		messageIDs = append(messageIDs, msg.ID)
+		mediaTypes = append(mediaTypes, r.MediaType)
 	}
 	result.MessagesTextExtractable = len(windowMsgs)
 
-	windows, idGroups := windowWithMessageIDs(windowMsgs, messageIDs, extraction.DefaultHistoricalWindowSize)
+	windows, idGroups, mediaTypeGroups := windowWithMessageIDs(windowMsgs, messageIDs, mediaTypes, extraction.DefaultHistoricalWindowSize)
 
 	var triplesExtracted int
 	for i, w := range windows {
@@ -254,7 +255,15 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			return result, fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
 		}
 
-		outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, ids, time.Now())
+		// A window can legitimately mix text and voice-transcribed
+		// messages — see windowSourceType's own doc comment (this is the
+		// same bug class the live path had, now fixed there too).
+		sourceType, err := windowSourceType(mediaTypeGroups[i])
+		if err != nil {
+			return result, fmt.Errorf("ImportWhatsApp: window %d/%d: %w", i+1, len(windows), err)
+		}
+
+		outcomes, err := a.storeExtractedTriples(ctx, triples, sourceType, ids, time.Now())
 		if err != nil {
 			return result, fmt.Errorf("ImportWhatsApp: store extracted triples for window %d/%d: %w", i+1, len(windows), err)
 		}
@@ -295,23 +304,27 @@ func localExportAudioFetcher(dir string) AudioFetcher {
 
 // windowWithMessageIDs partitions windowMsgs into fixed-size windows via
 // extraction.WindowByCount (called exactly as-is, not reimplemented), and
-// returns the corresponding message ID slice for each window using the
-// identical contiguous, size-based partitioning WindowByCount itself
-// uses (a plain messages[i:end] slice — verified by reading its
-// implementation, not assumed). Mirroring that same index arithmetic
-// once here — rather than modifying WindowByCount to also carry IDs, or
-// calling it twice — keeps windows and their message IDs in exact
-// lockstep without touching already-tested windowing code.
-func windowWithMessageIDs(windowMsgs []extraction.WindowMessage, messageIDs []uuid.UUID, size int) ([]extraction.Window, [][]uuid.UUID) {
+// returns the corresponding message ID and media-type slices for each
+// window using the identical contiguous, size-based partitioning
+// WindowByCount itself uses (a plain messages[i:end] slice — verified by
+// reading its implementation, not assumed). Mirroring that same index
+// arithmetic once here — rather than modifying WindowByCount to also
+// carry IDs, or calling it twice — keeps windows, their message IDs, and
+// their media types in exact lockstep without touching already-tested
+// windowing code. mediaTypeGroups feeds windowSourceType, since a window
+// can mix text and voice-transcribed messages.
+func windowWithMessageIDs(windowMsgs []extraction.WindowMessage, messageIDs []uuid.UUID, mediaTypes []string, size int) ([]extraction.Window, [][]uuid.UUID, [][]string) {
 	windows := extraction.WindowByCount(windowMsgs, size)
 
 	idGroups := make([][]uuid.UUID, len(windows))
+	mediaTypeGroups := make([][]string, len(windows))
 	offset := 0
 	for i, w := range windows {
 		n := len(w.Messages)
 		idGroups[i] = messageIDs[offset : offset+n]
+		mediaTypeGroups[i] = mediaTypes[offset : offset+n]
 		offset += n
 	}
 
-	return windows, idGroups
+	return windows, idGroups, mediaTypeGroups
 }
