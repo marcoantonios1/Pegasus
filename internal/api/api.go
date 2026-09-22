@@ -95,6 +95,10 @@ type API struct {
 	selfExternalIDs  map[string]bool
 	logger           func(format string, args ...any)
 
+	transcriber         Transcriber
+	audioFetcher        AudioFetcher
+	transcriptionConfig TranscriptionConfig
+
 	liveWindowsMu sync.Mutex
 	liveWindows   map[uuid.UUID]*liveConversationState
 }
@@ -151,6 +155,18 @@ type PipelineDeps struct {
 	// table; see that comment for why full resumability is out of this
 	// issue's scope). Defaults to log.Printf if nil.
 	Logger func(format string, args ...any)
+
+	// Transcriber, AudioFetcher, and TranscriptionConfig configure the
+	// voice pipeline (proposal §5/§8.4) — see voice_transcription.go for
+	// the full design. Transcriber is required for ImportWhatsApp/
+	// ProcessLiveMessage to transcribe voice messages at all; AudioFetcher
+	// is required in addition for the fetch to actually succeed (see its
+	// own doc comment on ImportWhatsApp always having one vs.
+	// ProcessLiveMessage not, by default). TranscriptionConfig's zero
+	// value falls back to its own documented defaults via withDefaults().
+	Transcriber         Transcriber
+	AudioFetcher        AudioFetcher
+	TranscriptionConfig TranscriptionConfig
 }
 
 // WithPipeline attaches write-pipeline dependencies to an already-
@@ -162,6 +178,9 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	a.extractor = deps.Extractor
 	a.activityRecorder = deps.ActivityRecorder
 	a.logger = deps.Logger
+	a.transcriber = deps.Transcriber
+	a.audioFetcher = deps.AudioFetcher
+	a.transcriptionConfig = deps.TranscriptionConfig
 
 	a.selfExternalIDs = make(map[string]bool, len(deps.SelfExternalIDs))
 	for _, id := range deps.SelfExternalIDs {
