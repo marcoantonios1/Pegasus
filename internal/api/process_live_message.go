@@ -64,7 +64,7 @@ func (a *API) resolveTextForTriage(ctx context.Context, msg *memory.Message, raw
 		}
 		return *rawMsg.Text, true
 	case ingestion.MediaTypeVoice:
-		return a.transcribeAndStore(ctx, msg, rawMsg.MediaURL)
+		return a.transcribeAndStore(ctx, msg, rawMsg.MediaURL, a.audioFetcher)
 	default:
 		return "", false
 	}
@@ -190,7 +190,7 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		a.liveWindows[conversationID] = state
 	}
 
-	wm := extraction.WindowMessage{Speaker: rawMsg.SenderExternalID, Timestamp: rawMsg.Timestamp, Text: *rawMsg.Text}
+	wm := extraction.WindowMessage{Speaker: rawMsg.SenderExternalID, Timestamp: rawMsg.Timestamp, Text: text}
 	completed, ready := state.windower.Add(wm)
 	state.pendingIDs = append(state.pendingIDs, msg.ID)
 
