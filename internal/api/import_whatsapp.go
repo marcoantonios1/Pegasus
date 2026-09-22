@@ -162,6 +162,7 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 
 	var windowMsgs []extraction.WindowMessage
 	var messageIDs []uuid.UUID
+	var mediaTypes []string
 	for _, r := range raws {
 		sender, err := a.resolveSender(ctx, r.SenderExternalID)
 		if err != nil {
