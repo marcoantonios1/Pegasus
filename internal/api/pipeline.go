@@ -261,5 +261,125 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 		outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: edge, Action: TripleActionCreated})
 	}
 
+	// Closes the gap the Phase 0 dry-run tooling surfaced (cmd/phase0_dryrun/NOTES.md):
+	// CostguardClient.Embed and EmbeddingStore.Create both existed and were
+	// tested in isolation, but nothing in production ever called either —
+	// the embeddings table was empty in any real deployment. Run only on
+	// the success path (after every triple above has been written) — see
+	// embedMessages' own doc comment for why embedding failures must never
+	// roll back or block the structured knowledge this function just wrote.
+	a.embedMessages(ctx, sourceMessageIDs)
+
 	return outcomes, nil
+}
+
+// messageText returns the text content to embed for msg: raw_text if
+// present, else transcript, else ok=false if neither is populated. This
+// mirrors the same decision ProcessLiveMessage/ImportWhatsApp already
+// make implicitly by only windowing messages with MediaType==text (see
+// their own "not text-extractable" branches) — a voice/image message has
+// no transcription pipeline wired in anywhere in this codebase yet, so
+// both RawText and Transcript are nil for it, and there is nothing to
+// embed, not an error.
+func messageText(m *memory.Message) (string, bool) {
+	if m.RawText != nil && *m.RawText != "" {
+		return *m.RawText, true
+	}
+	if m.Transcript != nil && *m.Transcript != "" {
+		return *m.Transcript, true
+	}
+	return "", false
+}
+
+// embedMessages generates and stores an embedding for each distinct
+// message in messageIDs that doesn't already have one (see
+// EmbeddingStore.GetByMessageID's own doc comment on the idempotency
+// check this relies on).
+//
+// Runs per MESSAGE, not per triple, deliberately: storeExtractedTriples
+// calls this once, after its triple loop, with the same sourceMessageIDs
+// every triple in that call shares — not once per triple — so a message
+// backing several triples (or reinforcing existing ones) only reaches
+// Embed() once per call, and the seen-set below still catches duplicate
+// IDs within messageIDs itself as a second layer. A message can produce
+// zero, one, or several triples (zero is a normal outcome — e.g. triage
+// flagged a window a candidate but extraction found nothing from it, see
+// TripleActionSkippedNoCorrectionTarget for a different zero-triple case)
+// — it still needs exactly one embedding regardless, since semantic
+// search over raw content (SearchSemantic / EmbeddingStore.
+// SearchSimilarMessages) and structured extraction are two different
+// downstream consumers of the same message, not the same concern.
+//
+// Scope note: this only reaches messages that make it as far as
+// storeExtractedTriples — i.e. messages in a window triage already
+// flagged as a candidate. A message in a window triage flagged as NOISE
+// never calls this function at all (see ProcessLiveMessage/
+// ImportWhatsApp, which only call storeExtractedTriples for candidate
+// windows) and stays unembedded. That's this issue's actual scope, not
+// an oversight: the insertion point is this shared function, not a
+// broader change to either caller's triage-gating; embedding every
+// message regardless of triage outcome would be a different, larger
+// change made at a different call site.
+//
+// Failure behavior, decided explicitly: log-and-continue, not retry-
+// with-backoff and not fail-the-whole-write. By the time this runs, every
+// triple's edge has already been written successfully (this is called
+// after the triple loop, not before or interleaved with it) — failing
+// storeExtractedTriples' whole call because Costguard's embeddings
+// endpoint had a transient error would block or appear to roll back
+// real, already-correct structured knowledge over a failure in a
+// completely separate downstream concern. This is NOT silent
+// swallow-and-forget, which the acceptance criteria explicitly rule out:
+// every failure (existing-embedding check, message load, the Embed call
+// itself, or the store write) is logged via a.logf — the same Logger
+// hook WithPipeline already wires for ImportWhatsApp's progress lines,
+// not a print statement only visible to someone watching stdout — with
+// the message ID and error, so a message that fails to embed is
+// discoverable and re-embeddable later. A batch "backfill missing
+// embeddings" utility (querying for messages with no embeddings row and
+// re-running this) is a natural follow-up issue this logging makes
+// possible; it is not built here.
+func (a *API) embedMessages(ctx context.Context, messageIDs []uuid.UUID) {
+	if a.embedder == nil {
+		return
+	}
+
+	seen := make(map[uuid.UUID]bool, len(messageIDs))
+	for _, id := range messageIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		existing, err := a.embeddings.GetByMessageID(ctx, id)
+		if err != nil {
+			a.logf("embedMessages: check existing embedding for message %s: %v", id, err)
+			continue
+		}
+		if existing != nil {
+			continue
+		}
+
+		msg, err := a.messages.GetByID(ctx, id)
+		if err != nil {
+			a.logf("embedMessages: load message %s: %v", id, err)
+			continue
+		}
+
+		text, ok := messageText(msg)
+		if !ok {
+			continue
+		}
+
+		vec, err := a.embedder.Embed(ctx, text)
+		if err != nil {
+			a.logf("embedMessages: embed message %s: %v", id, err)
+			continue
+		}
+
+		if err := a.embeddings.Create(ctx, &memory.Embedding{MessageID: id, Vector: vec}); err != nil {
+			a.logf("embedMessages: store embedding for message %s: %v", id, err)
+			continue
+		}
+	}
 }

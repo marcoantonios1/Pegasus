@@ -97,20 +97,36 @@ that needs Costguard pricing configuration, not a tooling fix here.
 
 ## What this dry-run's cost figure does NOT include
 
-Confirmed by reading `ImportWhatsApp`'s actual code path, not assumed:
+**Update — embeddings are now included.** The gap described below (this
+section, as originally written) was closed by a follow-up issue: embedding
+generation is now wired into `storeExtractedTriples`
+(`internal/api/pipeline.go`'s `embedMessages`), one embedding per distinct
+source message, called after that function's triple-storage loop
+succeeds (log-and-continue on failure — see `embedMessages`' own doc
+comment for the full reasoning). `run`'s existing usage query (grouped by
+`model, path`) picked this up with zero changes needed — confirmed
+against a live Costguard run, not assumed: `nomic-embed-text` /
+`/v1/embeddings` shows up as its own row in `summary.md`'s cost table,
+with the same `price_found` honesty already applied to the other local
+models (it came back `price_found=false` too, during that same
+confirmation run). What did need a small fix: `summary.md`'s "not
+captured" caveat about embeddings was now stale once real embedding
+calls started happening — see `summary.go`'s `writeCostAndTiming` for the
+corrected wording.
 
-- **Embeddings** — `ImportWhatsApp` never calls the embedder. Nothing in
-  the write pipeline writes to the `embeddings` table yet (a pre-existing
-  gap flagged when `CostguardClient.Embed` was first built, for the read
-  methods).
+Confirmed by reading `ImportWhatsApp`'s actual code path, not assumed —
+what's still genuinely missing:
+
 - **Voice transcription** — voice notes are stored (`processed=true`
   immediately) but never transcribed or extracted; no Whisper/audio call
-  happens anywhere in `ImportWhatsApp`. If Marco's real month includes
-  voice notes, their real transcription cost is entirely absent from
-  this tool's cost figures — a materially incomplete cost picture if
-  voice volume is significant, not just a rounding gap.
+  happens anywhere in `ImportWhatsApp`, so they never reach embedding
+  either (`messageText` in `pipeline.go` has nothing to embed without a
+  transcript). If Marco's real month includes voice notes, their real
+  transcription (and embedding) cost is entirely absent from this tool's
+  cost figures — a materially incomplete cost picture if voice volume is
+  significant, not just a rounding gap.
 
-Both are stated plainly in `summary.md` itself, not just here.
+Stated plainly in `summary.md` itself, not just here.
 
 ## The triage-candidate-rate caveat
 
@@ -123,6 +139,17 @@ inflates the rate relative to a true per-message measurement. Comparing
 this run's percentage directly against §5's estimate is comparing two
 different units; `summary.md` says so rather than presenting a
 misleadingly precise-looking single number.
+
+## Explicitly out of scope: backfilling old messages' missing embeddings
+
+Any message written before embedding generation was wired in (including
+the real Demi Vronen and Bugs dry-run data from before this fix) has no
+embedding row and stays that way — this issue does not backfill it. A
+small batch utility (query for messages with no matching `embeddings`
+row, call `Embed` for each) is a natural, likely-immediate follow-up
+issue, made possible by `embedMessages`' error logging (every embed
+failure is logged with its message ID specifically so it's
+discoverable and re-embeddable later) — not built speculatively here.
 
 ## What still needs Marco
 

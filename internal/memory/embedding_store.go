@@ -2,8 +2,10 @@ package memory
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
@@ -41,6 +43,44 @@ func (s *EmbeddingStore) GetByID(ctx context.Context, id uuid.UUID) (*Embedding,
 		WHERE id = $1
 	`, id).Scan(&e.ID, &e.MessageID, &vec)
 	if err != nil {
+		return nil, err
+	}
+
+	e.Vector = vec.Slice()
+
+	return &e, nil
+}
+
+// GetByMessageID returns the embedding for messageID, or (nil, nil) if
+// none exists. Added for the write pipeline (internal/api), which needs
+// to check idempotently whether a message already has an embedding
+// before generating a new one — reprocessing or retrying the same
+// message (e.g. reinforcement) must not produce duplicate embedding rows.
+//
+// This is a SELECT-then-INSERT check at the Go layer, not a DB-level
+// guarantee: the embeddings table has no UNIQUE constraint on message_id
+// (see migration 000004 — deliberately not added there, since embeddings
+// are append-only "a changed message gets a new row" per Update's own
+// doc comment below, and a unique constraint would conflict with that if
+// re-embedding on content change is ever needed). That means this check
+// is sufficient for the write pipeline's actual concern — sequential
+// reprocessing/retry of the same message — but is not race-proof against
+// two truly concurrent calls embedding the same message_id at once;
+// nothing in this pipeline does that today.
+func (s *EmbeddingStore) GetByMessageID(ctx context.Context, messageID uuid.UUID) (*Embedding, error) {
+	var e Embedding
+	var vec pgvector.Vector
+
+	err := s.db.QueryRow(ctx, `
+		SELECT id, message_id, vector
+		FROM embeddings
+		WHERE message_id = $1
+		LIMIT 1
+	`, messageID).Scan(&e.ID, &e.MessageID, &vec)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
