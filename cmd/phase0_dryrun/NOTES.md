@@ -114,19 +114,82 @@ captured" caveat about embeddings was now stale once real embedding
 calls started happening — see `summary.go`'s `writeCostAndTiming` for the
 corrected wording.
 
-Confirmed by reading `ImportWhatsApp`'s actual code path, not assumed —
-what's still genuinely missing:
+**Update — voice transcription is now included too.** The gap described
+below (this section, as originally written) was closed by a follow-up
+issue: voice messages are transcribed (local Speaches, escalating to
+OpenAI on low confidence or detected Arabic — see
+`internal/api/voice_transcription.go`) before entering the same
+triage/extraction/embedding path text does. `run`'s usage query picked
+this up automatically too: `Systran/faster-whisper-large-v3` /
+`/v1/audio/transcriptions` shows up as its own row in `summary.md`'s cost
+table.
 
-- **Voice transcription** — voice notes are stored (`processed=true`
+Confirmed against a REAL run, not a synthetic smoke test — see "Real
+manual-test findings" below for what that run actually surfaced,
+including two problems it's important to read before trusting a
+transcription-heavy cost/completeness figure from this tool.
+
+~~- **Voice transcription** — voice notes are stored (`processed=true`
   immediately) but never transcribed or extracted; no Whisper/audio call
   happens anywhere in `ImportWhatsApp`, so they never reach embedding
   either (`messageText` in `pipeline.go` has nothing to embed without a
   transcript). If Marco's real month includes voice notes, their real
   transcription (and embedding) cost is entirely absent from this tool's
   cost figures — a materially incomplete cost picture if voice volume is
-  significant, not just a rounding gap.
+  significant, not just a rounding gap.~~ (closed, see above)
 
 Stated plainly in `summary.md` itself, not just here.
+
+## Real manual-test findings: running `run` against Marco's actual Demi
+## Vronen export with voice transcription wired in
+
+Run against the real export (374 messages, 44 real voice notes) rather
+than synthetic data, per this tool's own "no fabricated real data" rule.
+Two real, unrelated problems surfaced:
+
+1. **The Speaches idle-restart takes far longer than `whisper_spotcheck`
+   originally observed.** `NOTES.md`'s spot-check (this same document,
+   the sibling `cmd/whisper_spotcheck` one) found "a single retry a few
+   seconds later succeeded both times" and the voice-transcription
+   issue's retry logic (`extraction.Transcribe`) originally used a 3s
+   backoff on that basis. This real run showed that estimate was too
+   optimistic: 11 of the 44 real voice notes failed BOTH the local and
+   escalated leg entirely. Investigating live (`docker inspect
+   infra-speaches-1`, direct `curl` against its `/v1/audio/transcriptions`
+   endpoint) confirmed Speaches doesn't just reload its model after 300s
+   idle — the whole container process restarts (`RestartCount`
+   incrementing on each post-idle request), and a full restart-to-ready
+   cycle took 20-30+ seconds in this environment, not "a few seconds". Two
+   direct curl calls in a row both timed out waiting for that restart.
+   **Fixed**: `DefaultTranscriptionRetryBackoff` raised from 3s to 30s
+   (`internal/extraction/transcribe.go`), now overridable per-client via
+   `CostguardClient.TranscriptionRetryBackoff` so tests don't have to sit
+   through it. The failure-HANDLING itself was already correct under this
+   real, sustained failure — those 11 messages were logged clearly, left
+   `transcript`/`processed` unset, and did not abort the batch — this was
+   purely the backoff constant being wrong, not a correctness bug.
+
+2. **A separate, pre-existing bug crashed the run at window 32/46 —
+   nothing to do with voice.** `ImportWhatsApp: extract window 32/46:
+   extraction call: parse costguard response: invalid character '\x1f'
+   looking for beginning of value`. `\x1f` is gzip's magic byte:
+   Costguard returned a gzip-`Content-Encoding`d `/v1/chat/completions`
+   response for that extraction (Pass 2) call, and
+   `internal/extraction/client.go`'s `Complete`/`CompleteWithModel` don't
+   decompress it before JSON-parsing. This is in the general chat-
+   completion HTTP path both triage and extraction share — unrelated to
+   `internal/extraction/transcribe.go`'s audio call, which is a separate
+   method — and pre-dates the voice-transcription issue entirely. **Not
+   fixed as part of voice transcription** (different code path, out of
+   that issue's scope) — needs its own issue: either have `CostguardClient`
+   set `Accept-Encoding` explicitly and decompress gzip responses, or
+   confirm why Go's `http.Transport` isn't already doing this
+   transparently (it normally does, unless something upstream sets
+   `Accept-Encoding` itself, which would explain a body arriving still
+   compressed). Blocks getting a single clean, uninterrupted `run` all the
+   way through a real multi-hundred-message export — an import that hits
+   this fails partway with a partial `run.json`, same "partial result
+   still written" behavior as any other `ImportWhatsApp` error.
 
 ## The triage-candidate-rate caveat
 

@@ -45,11 +45,15 @@ type ImportResult struct {
 	ExternalConversationID string
 
 	// MessagesParsed is every message the export file parser (adapter)
-	// produced, including voice/image/video entries that never reach
-	// windowing/extraction (see the "not text" branch in ImportWhatsApp).
+	// produced, including image/video entries (and voice entries that
+	// failed transcription entirely) that never reach windowing/extraction
+	// (see the "not extractable" branch in ImportWhatsApp).
 	MessagesParsed int
-	// MessagesTextExtractable is the subset with MediaType == text and
-	// non-nil Text — the ones that actually got windowed.
+	// MessagesTextExtractable is the subset that actually got windowed:
+	// MediaType == text with non-nil Text, plus MediaType == voice that
+	// transcribed successfully (transcript text feeds the same window
+	// text/extractable count — requirement 5, no separate accounting for
+	// voice-derived text).
 	MessagesTextExtractable int
 
 	Windows []WindowResult
@@ -133,6 +137,14 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 	externalConversationID := strings.TrimSuffix(filepath.Base(exportPath), filepath.Ext(exportPath))
 	conversationID := resolveConversationID("whatsapp", externalConversationID)
 
+	// A "with media" WhatsApp export's voice entries carry MediaURL as a
+	// bare filename (see internal/ingestion/whatsapp/export.go's
+	// attachedFileRe) relative to the export file's own directory, where
+	// the sibling audio files live — always resolvable here, unlike
+	// ProcessLiveMessage's live path (see AudioFetcher's own doc comment
+	// for why that one has no fetcher by default).
+	audioFetcher := localExportAudioFetcher(filepath.Dir(exportPath))
+
 	raws, err := whatsapp.NewExportParser().Parse(f, externalConversationID)
 	if err != nil {
 		return nil, fmt.Errorf("ImportWhatsApp: parse %s: %w", exportPath, err)
@@ -150,18 +162,28 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 
 	var windowMsgs []extraction.WindowMessage
 	var messageIDs []uuid.UUID
+	var mediaTypes []string
 	for _, r := range raws {
 		sender, err := a.resolveSender(ctx, r.SenderExternalID)
 		if err != nil {
 			return result, fmt.Errorf("ImportWhatsApp: resolve sender: %w", err)
 		}
 
-		if r.MediaType != ingestion.MediaTypeText || r.Text == nil {
-			// Same limitation as internal/bulkimport.processConversation:
-			// voice/image entries carry no text at this stage (no
-			// transcription/vision pipeline wired in anywhere yet) — not
-			// extractable, so not windowed. Still stored and marked
-			// processed, since there is nothing further to do with them.
+		// image/video (and a MediaTypeText entry with a nil Text, which the
+		// adapter shouldn't produce but isn't guaranteed not to) have no
+		// extraction path at all — stored and marked processed immediately,
+		// same as before this issue.
+		if r.MediaType != ingestion.MediaTypeText && r.MediaType != ingestion.MediaTypeVoice {
+			msg := &memory.Message{
+				ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
+				RawText: r.Text, MediaRef: r.MediaURL, Processed: true, Timestamp: r.Timestamp,
+			}
+			if err := a.messages.Create(ctx, msg); err != nil {
+				return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
+			}
+			continue
+		}
+		if r.MediaType == ingestion.MediaTypeText && r.Text == nil {
 			msg := &memory.Message{
 				ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 				RawText: r.Text, MediaRef: r.MediaURL, Processed: true, Timestamp: r.Timestamp,
@@ -180,12 +202,32 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 		}
 
-		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: r.SenderExternalID, Timestamp: r.Timestamp, Text: *r.Text})
+		text := ""
+		if r.MediaType == ingestion.MediaTypeText {
+			text = *r.Text
+		} else {
+			// Voice: transcription must complete before this message can
+			// enter windowing/triage (requirement 5 — no text to triage
+			// until transcribed). A total transcription failure leaves the
+			// message stored with Processed: false (set above) and simply
+			// skips windowing this pass — discoverable/re-attemptable, not
+			// silently dropped or a batch-aborting error (requirement 6;
+			// transcribeAndStore/transcribeVoiceMessage already logged the
+			// failure with the message ID).
+			var ok bool
+			text, ok = a.transcribeAndStore(ctx, msg, r.MediaURL, audioFetcher)
+			if !ok {
+				continue
+			}
+		}
+
+		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: r.SenderExternalID, Timestamp: r.Timestamp, Text: text})
 		messageIDs = append(messageIDs, msg.ID)
+		mediaTypes = append(mediaTypes, r.MediaType)
 	}
 	result.MessagesTextExtractable = len(windowMsgs)
 
-	windows, idGroups := windowWithMessageIDs(windowMsgs, messageIDs, extraction.DefaultHistoricalWindowSize)
+	windows, idGroups, mediaTypeGroups := windowWithMessageIDs(windowMsgs, messageIDs, mediaTypes, extraction.DefaultHistoricalWindowSize)
 
 	var triplesExtracted int
 	for i, w := range windows {
@@ -213,7 +255,15 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			return result, fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
 		}
 
-		outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, ids, time.Now())
+		// A window can legitimately mix text and voice-transcribed
+		// messages — see windowSourceType's own doc comment (this is the
+		// same bug class the live path had, now fixed there too).
+		sourceType, err := windowSourceType(mediaTypeGroups[i])
+		if err != nil {
+			return result, fmt.Errorf("ImportWhatsApp: window %d/%d: %w", i+1, len(windows), err)
+		}
+
+		outcomes, err := a.storeExtractedTriples(ctx, triples, sourceType, ids, time.Now())
 		if err != nil {
 			return result, fmt.Errorf("ImportWhatsApp: store extracted triples for window %d/%d: %w", i+1, len(windows), err)
 		}
@@ -234,25 +284,47 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 	return result, nil
 }
 
+// localExportAudioFetcher builds an AudioFetcher that reads mediaRef as a
+// filename relative to dir — ImportWhatsApp's own AudioFetcher, scoped to
+// one export file's directory (see AudioFetcher's own doc comment on why
+// ImportWhatsApp always has one, unlike ProcessLiveMessage). mediaRef
+// values come from whatsapp.ExportParser (attachedFileRe) as bare
+// filenames, e.g. "PTT-20260702-WA0011.opus", with the actual bytes
+// sitting alongside the export .txt file in a "with media" export.
+func localExportAudioFetcher(dir string) AudioFetcher {
+	return func(_ context.Context, mediaRef string) ([]byte, error) {
+		path := filepath.Join(dir, mediaRef)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read audio file %s: %w", path, err)
+		}
+		return data, nil
+	}
+}
+
 // windowWithMessageIDs partitions windowMsgs into fixed-size windows via
 // extraction.WindowByCount (called exactly as-is, not reimplemented), and
-// returns the corresponding message ID slice for each window using the
-// identical contiguous, size-based partitioning WindowByCount itself
-// uses (a plain messages[i:end] slice — verified by reading its
-// implementation, not assumed). Mirroring that same index arithmetic
-// once here — rather than modifying WindowByCount to also carry IDs, or
-// calling it twice — keeps windows and their message IDs in exact
-// lockstep without touching already-tested windowing code.
-func windowWithMessageIDs(windowMsgs []extraction.WindowMessage, messageIDs []uuid.UUID, size int) ([]extraction.Window, [][]uuid.UUID) {
+// returns the corresponding message ID and media-type slices for each
+// window using the identical contiguous, size-based partitioning
+// WindowByCount itself uses (a plain messages[i:end] slice — verified by
+// reading its implementation, not assumed). Mirroring that same index
+// arithmetic once here — rather than modifying WindowByCount to also
+// carry IDs, or calling it twice — keeps windows, their message IDs, and
+// their media types in exact lockstep without touching already-tested
+// windowing code. mediaTypeGroups feeds windowSourceType, since a window
+// can mix text and voice-transcribed messages.
+func windowWithMessageIDs(windowMsgs []extraction.WindowMessage, messageIDs []uuid.UUID, mediaTypes []string, size int) ([]extraction.Window, [][]uuid.UUID, [][]string) {
 	windows := extraction.WindowByCount(windowMsgs, size)
 
 	idGroups := make([][]uuid.UUID, len(windows))
+	mediaTypeGroups := make([][]string, len(windows))
 	offset := 0
 	for i, w := range windows {
 		n := len(w.Messages)
 		idGroups[i] = messageIDs[offset : offset+n]
+		mediaTypeGroups[i] = mediaTypes[offset : offset+n]
 		offset += n
 	}
 
-	return windows, idGroups
+	return windows, idGroups, mediaTypeGroups
 }
