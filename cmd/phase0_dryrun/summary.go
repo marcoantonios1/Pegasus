@@ -156,13 +156,19 @@ func writeCostAndTiming(b *strings.Builder, runs []RunResult, totalMonths float6
 	}
 	fmt.Fprintf(b, "| **Total** | | | | | **$%.4f** | %d/%d |\n\n", totalCost, totalPriceFound, totalRequests)
 
-	b.WriteString("**Not captured by this run, and NOT in the totals above** — both are known gaps in the write ")
+	b.WriteString("**Embeddings are now included above** (as their own `nomic-embed-text` / `/v1/embeddings` row) — ")
+	b.WriteString("wired into the write pipeline via storeExtractedTriples, one embedding per distinct source message ")
+	b.WriteString("(see internal/api/pipeline.go's embedMessages). Earlier dry-run reports from before that was wired ")
+	b.WriteString("in showed this table with no embeddings row at all; if you're comparing against one of those, the ")
+	b.WriteString("totals are not directly comparable.\n\n")
+
+	b.WriteString("**Still NOT captured by this run, and NOT in the totals above** — a known gap in the write ")
 	b.WriteString("pipeline as built, not something this dry-run's cost figure secretly includes:\n")
-	b.WriteString("- **Embeddings**: ImportWhatsApp never calls the embedder — nothing in the write pipeline writes ")
-	b.WriteString("to the embeddings table yet (a pre-existing gap, see CostguardClient.Embed's own doc comment).\n")
 	b.WriteString("- **Voice transcription**: voice notes are stored but never transcribed or extracted — no ")
-	b.WriteString("Whisper/audio pipeline is wired into ImportWhatsApp. If this month's export includes voice notes, ")
-	b.WriteString("their real transcription cost is entirely absent from the numbers above.\n\n")
+	b.WriteString("Whisper/audio pipeline is wired into ImportWhatsApp, so they never reach embedding either (nothing ")
+	b.WriteString("to embed without a transcript — see messageText in internal/api/pipeline.go). If this month's export ")
+	b.WriteString("includes voice notes, their real transcription (and embedding) cost is entirely absent from the ")
+	b.WriteString("numbers above.\n\n")
 
 	fmt.Fprintf(b, "- Wall-clock duration for this run: %s\n", totalDuration.Round(time.Second))
 
