@@ -116,10 +116,35 @@ func (e *TranscriptionStatusError) Error() string {
 	return fmt.Sprintf("costguard returned status %d: %s", e.StatusCode, e.Body)
 }
 
-// transcriptionRetryBackoff is how long Transcribe waits before its one
-// retry on a 502 — see Transcribe's own doc comment for what this works
-// around.
-const transcriptionRetryBackoff = 3 * time.Second
+// DefaultTranscriptionRetryBackoff is how long Transcribe waits before its
+// one retry on a 502, when CostguardClient.TranscriptionRetryBackoff is
+// unset — see Transcribe's own doc comment for what this works around.
+//
+// Revised from an original 3s guess (cmd/whisper_spotcheck/NOTES.md's
+// "a single retry a few seconds later succeeded both times") after a real
+// manual test run against Marco's actual WhatsApp export (373 messages,
+// 44 real voice notes) showed 3s was nowhere near enough: directly
+// curling the local Speaches container after its 300s idle-unload showed
+// it doesn't just reload a model, it restarts the whole process —
+// confirmed live via `docker inspect`'s RestartCount incrementing on
+// every post-idle request — and a full restart-to-ready cycle took
+// 20-30+ seconds in that test (a curl straight at the endpoint timed out
+// waiting), not "a few seconds". 11 of 44 real voice notes failed both
+// the local AND escalated leg in that run specifically because 3s wasn't
+// long enough to survive a restart in progress — the failure-handling
+// itself worked exactly as designed (logged, left transcript/processed
+// unset, didn't crash the batch), but the backoff was empirically too
+// short. 30s gives comfortable margin above the observed ~23s restart
+// without being so long it stalls a live caller for no reason on a
+// genuine (non-restart) failure — still just ONE retry, not a loop.
+const DefaultTranscriptionRetryBackoff = 30 * time.Second
+
+func (c *CostguardClient) transcriptionRetryBackoff() time.Duration {
+	if c.TranscriptionRetryBackoff > 0 {
+		return c.TranscriptionRetryBackoff
+	}
+	return DefaultTranscriptionRetryBackoff
+}
 
 // transcriptionTimeout is deliberately longer than CostguardClient's
 // other calls (its HTTPClient defaults to 60s, fine for chat/embeddings)
@@ -190,7 +215,7 @@ func (c *CostguardClient) Transcribe(ctx context.Context, audio []byte, filename
 
 	var statusErr *TranscriptionStatusError
 	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusBadGateway {
-		time.Sleep(transcriptionRetryBackoff)
+		time.Sleep(c.transcriptionRetryBackoff())
 		resp, retryErr := c.transcribeOnce(ctx, audio, filename, opts)
 		if retryErr != nil {
 			return nil, fmt.Errorf("transcribe (after 502 retry): %w", retryErr)

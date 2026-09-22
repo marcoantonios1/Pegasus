@@ -133,6 +133,12 @@ func TestTranscribe_RetriesOnceOn502ThenSucceeds(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
+	// Overridden to keep this test fast — DefaultTranscriptionRetryBackoff
+	// is now 30s (see its own doc comment for the real-world evidence
+	// behind that value), which TranscriptionRetryBackoff exists
+	// specifically so a test doesn't have to sit through.
+	const testBackoff = 50 * time.Millisecond
+	client.TranscriptionRetryBackoff = testBackoff
 
 	start := time.Now()
 	resp, err := client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
@@ -146,14 +152,27 @@ func TestTranscribe_RetriesOnceOn502ThenSucceeds(t *testing.T) {
 	if atomic.LoadInt32(&requestCount) != 2 {
 		t.Fatalf("expected exactly 2 requests (1 failed + 1 retry), got %d", requestCount)
 	}
-	if elapsed < transcriptionRetryBackoff {
-		t.Errorf("expected Transcribe to wait at least %s before retrying, only took %s", transcriptionRetryBackoff, elapsed)
+	if elapsed < testBackoff {
+		t.Errorf("expected Transcribe to wait at least %s before retrying, only took %s", testBackoff, elapsed)
+	}
+}
+
+// TestTranscribe_DefaultRetryBackoffIsUsedWhenUnset confirms
+// transcriptionRetryBackoff() falls back to DefaultTranscriptionRetryBackoff
+// (30s, per real evidence — see its own doc comment) when
+// CostguardClient.TranscriptionRetryBackoff is left at its zero value, so
+// production callers get the real default without having to set it
+// explicitly.
+func TestTranscribe_DefaultRetryBackoffIsUsedWhenUnset(t *testing.T) {
+	client := NewCostguardClient("http://unused.invalid")
+	if got := client.transcriptionRetryBackoff(); got != DefaultTranscriptionRetryBackoff {
+		t.Errorf("expected default backoff %s when unset, got %s", DefaultTranscriptionRetryBackoff, got)
 	}
 }
 
 // TestTranscribe_DoesNotRetryOnNon502Status confirms the retry is scoped
 // to exactly 502 — a genuine failure (e.g. 400 invalid file format) must
-// not be retried and wasted 3s on, and must surface as an error.
+// not be retried and wasted time on, and must surface as an error.
 func TestTranscribe_DoesNotRetryOnNon502Status(t *testing.T) {
 	var requestCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +205,7 @@ func TestTranscribe_FailsAfterRetryStillReturns502(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
+	client.TranscriptionRetryBackoff = 50 * time.Millisecond // keep this test fast — see the other backoff override's doc comment
 	_, err := client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
 	if err == nil {
 		t.Fatal("expected an error when the retry also returns 502, got nil")
