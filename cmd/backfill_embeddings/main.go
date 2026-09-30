@@ -10,7 +10,7 @@
 // pipeline already uses) to embed them, inheriting embedMessages' own
 // idempotency (EmbeddingStore.GetByMessageID) and log-and-continue
 // failure handling by construction.
-// test
+//
 //	go run ./cmd/backfill_embeddings [--pegasus-db <dsn>] [--costguard-url <url>] [--agent <name>]
 package main
 
