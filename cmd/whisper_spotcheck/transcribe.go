@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/marcoantonios1/Pegasus/internal/reportpath"
 )
 
 // audioExtensions is deliberately permissive — voice notes arrive in
@@ -133,6 +135,9 @@ func runTranscribe(args []string) error {
 	if *dir == "" || *out == "" {
 		return fmt.Errorf("--dir and --out are required")
 	}
+	if err := reportpath.EnsureOutsideRepo(*out); err != nil {
+		return err
+	}
 
 	entries, err := os.ReadDir(*dir)
 	if err != nil {
@@ -178,7 +183,11 @@ func runTranscribe(args []string) error {
 		results = append(results, fr)
 	}
 
-	outFile, err := os.Create(*out)
+	// os.Create's mode (0666 masked by umask) isn't directly controllable
+	// inline — os.OpenFile with an explicit 0o600 instead, same reasoning
+	// as every other report-output write in these tools: real personal
+	// transcription data, owner-read/write only regardless of umask.
+	outFile, err := os.OpenFile(*out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}

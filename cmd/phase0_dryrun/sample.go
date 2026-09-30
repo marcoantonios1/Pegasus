@@ -35,7 +35,7 @@ func writeSample(path string, runs []RunResult, size int, seed int64) error {
 
 	if len(items) == 0 {
 		b.WriteString("_(no extracted triples to sample — nothing to review)_\n")
-		return os.WriteFile(path, []byte(b.String()), 0o644)
+		return os.WriteFile(path, []byte(b.String()), 0o600)
 	}
 
 	for i, it := range sampled {
@@ -47,7 +47,7 @@ func writeSample(path string, runs []RunResult, size int, seed int64) error {
 		b.WriteString("\n| Correct? (y/n) | Note |\n|---|---|\n| | |\n\n")
 	}
 
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
 // stratifiedSample picks up to size items from all, spreading the

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# scripts/hooks/pre-commit — template pre-commit hook. NOT active until
+# installed — git only runs hooks from .git/hooks/, which is never
+# checked into version control, so this file has to be copied/symlinked
+# there manually (or the hooksPath configured to point here directly —
+# see README.md's "Git hooks" section for the one-line setup).
+#
+# All the actual pattern-matching logic lives in
+# check-sensitive-filenames.sh (shared with
+# .github/workflows/check-sensitive-filenames.yml, the CI backstop for
+# when this hook isn't installed or is bypassed with --no-verify) —
+# this file only wires "staged files" into it.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+git diff --cached --name-only --diff-filter=ACMR | "$repo_root/scripts/hooks/check-sensitive-filenames.sh"

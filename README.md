@@ -10,6 +10,29 @@ docker compose up -d postgres migrate
 extension preinstalled — required by migrations 000004/000005). `migrate`
 applies everything in `db/migrations/` via `golang-migrate`.
 
+## Git hooks
+
+Install the pre-commit hook once per clone — it blocks committing any
+file matching a known real-personal-data report-output pattern
+(`review*.md`, `sample*.md`, `summary*.md`, `run*.json` — see
+`scripts/hooks/check-sensitive-filenames.sh` for exactly what's covered
+and why):
+
+```
+git config core.hooksPath scripts/hooks
+```
+
+This is a local, opt-in safety net (skippable with `--no-verify`, and
+never installed automatically on a fresh clone) — the actual enforcement
+backstop is CI (`.github/workflows/check-sensitive-filenames.yml`), which
+runs the same check against every tracked file on every push/PR
+regardless of whether this hook is installed. Dry-run/spot-check tooling
+(`cmd/phase0_dryrun`, `cmd/whisper_spotcheck`) also refuses at the tool
+level to write its own report output inside this repo in the first place
+(`internal/reportpath.EnsureOutsideRepo`) — these three layers are
+independent, not redundant: the hook and CI catch a file regardless of
+how it entered a commit, not just ones these specific tools produced.
+
 ## Backups
 
 The `backup` service in `docker-compose.yml` runs a daily `pg_dump` of the

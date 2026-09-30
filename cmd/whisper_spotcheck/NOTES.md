@@ -14,14 +14,22 @@ judgment happens in `review.md`, by Marco, by ear.
 
 `cmd/whisper_spotcheck` — two modes:
 
-- `transcribe --dir <audio dir> --base-url <costguard> --label <local|openai> --out <results.json>`
+- `transcribe --dir <audio dir> --base-url <costguard> --label <local|openai> --out ~/pegasus-reports/results.json`
   — sends every audio file in a directory through Costguard's real
   `/v1/audio/transcriptions` endpoint (not a mock, not calling Speaches/
   OpenAI directly) and captures the full `verbose_json` response plus a
   few derived summary numbers.
-- `report --local local.json --openai openai.json --out review.md` —
+- `report --local local.json --openai openai.json --out ~/pegasus-reports/review.md` —
   merges both legs into one markdown file, one section per audio file,
   with a blank rating table for manual annotation.
+
+**`--out` must point outside this repo** —
+`internal/reportpath.EnsureOutsideRepo` refuses to write real
+transcription content anywhere git could track it, regardless of
+gitignore state (this tool's own `review.md` output is exactly the real
+personal data that was once accidentally committed here — see
+`cmd/phase0_dryrun/NOTES.md`'s equivalent note for the full context). A
+repo-relative path like plain `review.md` will now error out.
 
 Kept as a real (non-throwaway) tool for now, unlike most of this repo's
 other manual-test CLIs — this issue is explicitly two-phase (build +

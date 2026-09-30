@@ -7,6 +7,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/marcoantonios1/Pegasus/internal/reportpath"
 )
 
 func runReport(args []string) error {
@@ -19,6 +21,9 @@ func runReport(args []string) error {
 	}
 	if *localPath == "" || *openaiPath == "" || *out == "" {
 		return fmt.Errorf("--local, --openai, and --out are required")
+	}
+	if err := reportpath.EnsureOutsideRepo(*out); err != nil {
+		return err
 	}
 
 	local, err := loadResults(*localPath)
@@ -80,7 +85,7 @@ func runReport(args []string) error {
 		b.WriteString("| | | |\n\n")
 	}
 
-	if err := os.WriteFile(*out, []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(*out, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("write output: %w", err)
 	}
 

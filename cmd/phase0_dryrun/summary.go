@@ -32,7 +32,7 @@ func writeSummary(path string, runs []RunResult, totalMonths float64) error {
 	writeCostAndTiming(&b, runs, totalMonths)
 	writeFailureClusters(&b, runs)
 
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
 func writePipelineMetrics(b *strings.Builder, runs []RunResult) {

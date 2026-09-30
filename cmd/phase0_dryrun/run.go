@@ -16,6 +16,7 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
+	"github.com/marcoantonios1/Pegasus/internal/reportpath"
 )
 
 func runRun(args []string) error {
@@ -31,6 +32,9 @@ func runRun(args []string) error {
 	}
 	if *exportPath == "" || *out == "" {
 		return fmt.Errorf("--export and --out are required")
+	}
+	if err := reportpath.EnsureOutsideRepo(*out); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
@@ -122,7 +126,7 @@ func runRun(args []string) error {
 	if err != nil {
 		return fmt.Errorf("marshal run result: %w", err)
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := os.WriteFile(*out, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", *out, err)
 	}
 

@@ -19,16 +19,26 @@ separate from formatting, so the report can be regenerated — different
 sample size, a fixed seed, a `--total-months` figure once known — without
 re-running the actual import):
 
-- `run --export <whatsapp export .txt> --out run.json` — runs
+- `run --export <whatsapp export .txt> --out ~/pegasus-reports/run.json` — runs
   `api.ImportWhatsApp` exactly as built (no dry-run-specific code path,
   see below), against real Costguard and the real Pegasus database, and
   captures the full result plus Costguard's own usage data for the run's
   time window.
-- `report --in run.json [--in run2.json ...] --out-summary summary.md
-  --out-sample sample.md [--sample-size N] [--seed N] [--total-months N]`
+- `report --in ~/pegasus-reports/run.json [--in run2.json ...] --out-summary ~/pegasus-reports/summary.md
+  --out-sample ~/pegasus-reports/sample.md [--sample-size N] [--seed N] [--total-months N]`
   — reads one or more `run.json` files (repeatable `--in`, in case Marco's
   "one month" spans more than one conversation export) and produces the
   two review artifacts.
+
+**`--out`/`--out-summary`/`--out-sample` must point outside this repo** —
+`internal/reportpath.EnsureOutsideRepo` refuses to write real personal
+report output anywhere git could track it, regardless of gitignore
+state. Added after real report output (voice transcripts, contacts'
+names, extracted facts) was accidentally committed to this repo while it
+was still public — this guard is the recurrence prevention, separate
+from whatever was done about the already-exposed history. The example
+paths above (`~/pegasus-reports/...`) aren't just a suggestion; a
+repo-relative path like plain `run.json` will now error out.
 
 ## Requirement 2's constraint, and what it forced
 

@@ -1,0 +1,23 @@
+name: Check for sensitive filenames
+
+# Enforcement backstop for scripts/hooks/check-sensitive-filenames.sh —
+# required in CI specifically because scripts/hooks/pre-commit is opt-in
+# (never installed on a fresh clone unless someone runs the setup step in
+# README.md) and can always be bypassed locally with --no-verify. This
+# check runs the exact same script against every currently-tracked file,
+# so it enforces the rule regardless of whether the local hook was ever
+# installed for whatever commit/PR triggered this run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check-sensitive-filenames:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check no tracked file matches a known real-personal-data output pattern
+        run: git ls-files | ./scripts/hooks/check-sensitive-filenames.sh

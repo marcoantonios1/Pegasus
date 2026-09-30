@@ -10,6 +10,7 @@ import (
 
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/reportpath"
 )
 
 // multiFlag collects a repeatable -in flag into a slice — report can
@@ -36,6 +37,12 @@ func runReport(args []string) error {
 	}
 	if len(inPaths) == 0 || *outSummary == "" || *outSample == "" {
 		return fmt.Errorf("--in (at least one), --out-summary, and --out-sample are required")
+	}
+	if err := reportpath.EnsureOutsideRepo(*outSummary); err != nil {
+		return err
+	}
+	if err := reportpath.EnsureOutsideRepo(*outSample); err != nil {
+		return err
 	}
 
 	var runs []RunResult
