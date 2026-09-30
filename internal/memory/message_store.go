@@ -227,6 +227,52 @@ func (s *MessageStore) CountByConversationSince(ctx context.Context, since time.
 	return counts, rows.Err()
 }
 
+// ListWithoutEmbeddings returns every message with no matching row in
+// embeddings — the query cmd/backfill_embeddings needs to find messages
+// written before embedding generation was wired into the write pipeline
+// (see internal/api/pipeline.go's embedMessages and storeExtractedTriples'
+// own doc comment on the gap it closed). A NOT EXISTS query, not a loop
+// calling EmbeddingStore.GetByMessageID per message: that check is right
+// for what it was built for (the write pipeline's own single-message
+// idempotency check, called once per already-known message ID) but
+// doesn't scale to "find every unembedded message across the whole
+// table" the way one SQL query does.
+//
+// Unpaginated: a personal-scale corpus (proposal §6.1) isn't expected to
+// need pagination for a one-shot backfill — add it if real message volume
+// ever makes that assumption wrong, not speculatively here.
+func (s *MessageStore) ListWithoutEmbeddings(ctx context.Context) ([]*Message, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			m.id, m.conversation_id, m.sender_id, m.media_type, m.raw_text, m.transcript,
+			m.transcript_confidence, m.media_ref, m.processed, m.timestamp
+		FROM messages m
+		WHERE NOT EXISTS (
+			SELECT 1 FROM embeddings e WHERE e.message_id = m.id
+		)
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*Message
+	for rows.Next() {
+		var m Message
+
+		if err := rows.Scan(
+			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+		); err != nil {
+			return nil, err
+		}
+
+		msgs = append(msgs, &m)
+	}
+
+	return msgs, rows.Err()
+}
+
 // LastMessageTime returns the most recent message timestamp across every
 // conversation in conversationIDs, or the zero time if none of them have
 // any messages (including when conversationIDs is empty). Deliberately

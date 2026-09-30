@@ -291,6 +291,22 @@ func messageText(m *memory.Message) (string, bool) {
 	return "", false
 }
 
+// EmbedMessagesResult tallies what embedMessages actually did across one
+// call's messageIDs — added for cmd/backfill_embeddings' summary output
+// (embedded vs. already-embedded vs. skipped-no-text vs. failed counts),
+// which embedMessages didn't used to return since its only caller before
+// this issue (storeExtractedTriples) never needed per-call counts, only
+// the side effect. Purely additive: storeExtractedTriples's own call
+// (`a.embedMessages(ctx, sourceMessageIDs)`) already discards whatever
+// embedMessages returns via a bare call statement, so this doesn't change
+// its behavior or require touching that call site.
+type EmbedMessagesResult struct {
+	Embedded        int
+	AlreadyEmbedded int
+	SkippedNoText   int
+	Failed          int
+}
+
 // embedMessages generates and stores an embedding for each distinct
 // message in messageIDs that doesn't already have one (see
 // EmbeddingStore.GetByMessageID's own doc comment on the idempotency
