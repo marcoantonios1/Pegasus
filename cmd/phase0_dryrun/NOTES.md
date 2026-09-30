@@ -173,23 +173,60 @@ Two real, unrelated problems surfaced:
    nothing to do with voice.** `ImportWhatsApp: extract window 32/46:
    extraction call: parse costguard response: invalid character '\x1f'
    looking for beginning of value`. `\x1f` is gzip's magic byte:
-   Costguard returned a gzip-`Content-Encoding`d `/v1/chat/completions`
-   response for that extraction (Pass 2) call, and
-   `internal/extraction/client.go`'s `Complete`/`CompleteWithModel` don't
-   decompress it before JSON-parsing. This is in the general chat-
-   completion HTTP path both triage and extraction share — unrelated to
-   `internal/extraction/transcribe.go`'s audio call, which is a separate
-   method — and pre-dates the voice-transcription issue entirely. **Not
-   fixed as part of voice transcription** (different code path, out of
-   that issue's scope) — needs its own issue: either have `CostguardClient`
-   set `Accept-Encoding` explicitly and decompress gzip responses, or
-   confirm why Go's `http.Transport` isn't already doing this
-   transparently (it normally does, unless something upstream sets
-   `Accept-Encoding` itself, which would explain a body arriving still
-   compressed). Blocks getting a single clean, uninterrupted `run` all the
-   way through a real multi-hundred-message export — an import that hits
-   this fails partway with a partial `run.json`, same "partial result
-   still written" behavior as any other `ImportWhatsApp` error.
+   Costguard returned a gzip-encoded `/v1/chat/completions` response for
+   that extraction (Pass 2) call, and `internal/extraction/client.go`'s
+   `Complete`/`CompleteWithModel` didn't decompress it before JSON-parsing.
+   This is in the general chat-completion HTTP path both triage and
+   extraction share — unrelated to `internal/extraction/transcribe.go`'s
+   audio call, which is a separate method — and pre-dates the
+   voice-transcription issue entirely. Not fixed as part of voice
+   transcription (different code path, out of that issue's scope).
+
+   **Update — fixed in a follow-up issue
+   (`fix-gzip-response-handling` branch).** Investigation (not assumption):
+   `CompleteWithModel` sets no `Accept-Encoding` and uses no custom
+   `Transport`/`DisableCompression`, ruling out the client breaking its own
+   auto-decompression. Could NOT reproduce the failure live against a
+   running Costguard instance — four direct curl tests (both models, small
+   and large responses, with and without an explicit
+   `Accept-Encoding: gzip`) all came back plain, uncompressed JSON.
+   Read-only investigation of Costguard's own source found its
+   upstream-facing client already relies on Go's standard transparent gzip
+   decompression when talking to a provider (it has its own test proving
+   this), and its cache-entry-cloning code (`internal/gateway/response.go`)
+   deliberately strips `Content-Encoding` when copying headers — "cached
+   bodies are always stored decoded... replaying a Content-Encoding header
+   would be wrong" — meaning Costguard's own maintainers already treat
+   this exact header/body mismatch as a real hazard elsewhere in that
+   codebase. Conclusion: most likely an intermittent condition on
+   Costguard's side (cache/retry/streaming-related, not audited further —
+   out of scope for a Pegasus-side fix), not a deterministic "Costguard
+   always gzips."
+
+   Fix (`internal/extraction/client.go`'s `maybeDecompressGzip`): checks
+   BOTH the `Content-Encoding: gzip` header AND the response body's own
+   gzip magic bytes (0x1f 0x8b) as a fallback — the second check exists
+   specifically because a response with compressed bytes but no
+   announcing header is the scenario this investigation judged most
+   likely, and a header-only check would silently miss exactly that case.
+   Applied once, before the status-code check, so a compressed error body
+   is also readable. `Embed`/`Transcribe` deliberately left untouched — an
+   `/v1/embeddings` check during this investigation was inconclusive (an
+   unrelated connection failure), not a confirmed Costguard-wide pattern.
+
+   **Real end-to-end validation**: `cmd/phase0_dryrun run` against a real
+   223-message slice of the Bugs export completed cleanly — 28 windows,
+   45 real chat-completion round trips (28 triage + 17 extraction calls),
+   zero errors, zero rejected triples. No `\x1f` crash. (The full,
+   unsliced Bugs export is 16,596 messages — far too large to run
+   end-to-end for this kind of validation; a real, unsliced-content slice
+   of it, not synthetic data, was used instead, consistent with this
+   tool's own "no fabricated data" rule — only the SIZE was reduced, not
+   the source.) This doesn't prove the exact intermittent gzip condition
+   was hit again during this specific run (nothing currently logs whether
+   `maybeDecompressGzip`'s gzip branch actually fired) — only that the
+   fix doesn't break the normal case across real traffic, and that no
+   equivalent crash recurred.
 
 ## The triage-candidate-rate caveat
 
