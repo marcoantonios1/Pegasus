@@ -81,11 +81,17 @@ func TestBackfillEmbeddings_OnlyEmbedsGenuinelyMissingMessages(t *testing.T) {
 		t.Error("expected ListWithoutEmbeddings to include the no-text message (it's still unembedded — text availability isn't this query's concern)")
 	}
 
-	ids := make([]uuid.UUID, len(unembedded))
-	for i, m := range unembedded {
-		ids[i] = m.ID
-	}
-	result, err := a.BackfillEmbeddings(ctx, ids)
+	// BackfillEmbeddings is called with only THIS test's own seeded IDs,
+	// not the full (unscoped, by design — see ListWithoutEmbeddings' own
+	// doc comment) query result: this suite runs against a real,
+	// persistent, shared dev database that has accumulated thousands of
+	// real unembedded messages from earlier dry-run sessions, and this
+	// test's exact-count assertions below are about ITS OWN three seeded
+	// messages specifically, not "how many unembedded messages exist in
+	// the whole database right now." The ListWithoutEmbeddings
+	// inclusion/exclusion assertions above already exercised the real,
+	// unscoped query end-to-end.
+	result, err := a.BackfillEmbeddings(ctx, []uuid.UUID{missingMsg.ID, noTextMsg.ID})
 	if err != nil {
 		t.Fatalf("BackfillEmbeddings: %v", err)
 	}
