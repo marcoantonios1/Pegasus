@@ -291,6 +291,22 @@ func messageText(m *memory.Message) (string, bool) {
 	return "", false
 }
 
+// EmbedMessagesResult tallies what embedMessages actually did across one
+// call's messageIDs — added for cmd/backfill_embeddings' summary output
+// (embedded vs. already-embedded vs. skipped-no-text vs. failed counts),
+// which embedMessages didn't used to return since its only caller before
+// this issue (storeExtractedTriples) never needed per-call counts, only
+// the side effect. Purely additive: storeExtractedTriples's own call
+// (`a.embedMessages(ctx, sourceMessageIDs)`) already discards whatever
+// embedMessages returns via a bare call statement, so this doesn't change
+// its behavior or require touching that call site.
+type EmbedMessagesResult struct {
+	Embedded        int
+	AlreadyEmbedded int
+	SkippedNoText   int
+	Failed          int
+}
+
 // embedMessages generates and stores an embedding for each distinct
 // message in messageIDs that doesn't already have one (see
 // EmbeddingStore.GetByMessageID's own doc comment on the idempotency
@@ -339,9 +355,10 @@ func messageText(m *memory.Message) (string, bool) {
 // embeddings" utility (querying for messages with no embeddings row and
 // re-running this) is a natural follow-up issue this logging makes
 // possible; it is not built here.
-func (a *API) embedMessages(ctx context.Context, messageIDs []uuid.UUID) {
+func (a *API) embedMessages(ctx context.Context, messageIDs []uuid.UUID) EmbedMessagesResult {
+	var result EmbedMessagesResult
 	if a.embedder == nil {
-		return
+		return result
 	}
 
 	seen := make(map[uuid.UUID]bool, len(messageIDs))
@@ -354,32 +371,75 @@ func (a *API) embedMessages(ctx context.Context, messageIDs []uuid.UUID) {
 		existing, err := a.embeddings.GetByMessageID(ctx, id)
 		if err != nil {
 			a.logf("embedMessages: check existing embedding for message %s: %v", id, err)
+			result.Failed++
 			continue
 		}
 		if existing != nil {
+			result.AlreadyEmbedded++
 			continue
 		}
 
 		msg, err := a.messages.GetByID(ctx, id)
 		if err != nil {
 			a.logf("embedMessages: load message %s: %v", id, err)
+			result.Failed++
 			continue
 		}
 
 		text, ok := messageText(msg)
 		if !ok {
+			result.SkippedNoText++
 			continue
 		}
 
 		vec, err := a.embedder.Embed(ctx, text)
 		if err != nil {
 			a.logf("embedMessages: embed message %s: %v", id, err)
+			result.Failed++
 			continue
 		}
 
 		if err := a.embeddings.Create(ctx, &memory.Embedding{MessageID: id, Vector: vec}); err != nil {
 			a.logf("embedMessages: store embedding for message %s: %v", id, err)
+			result.Failed++
 			continue
 		}
+
+		result.Embedded++
 	}
+
+	return result
+}
+
+// BackfillEmbeddings embeds every message in messageIDs that doesn't
+// already have one — the exported entry point cmd/backfill_embeddings
+// (and any future caller outside this package) uses to reuse
+// embedMessages' exact logic — idempotency via EmbeddingStore.
+// GetByMessageID, log-and-continue failure handling via a.logf,
+// messageText's raw_text-then-transcript fallback, "no text" as a normal
+// skip rather than a failure — rather than reimplementing any of it. See
+// embedMessages' own doc comment for the full behavior this inherits by
+// construction, including its failure philosophy.
+//
+// Idempotent by construction, not by separate logic here: running this
+// twice against the same messageIDs relies entirely on embedMessages'
+// own GetByMessageID check (every message from the first run now has a
+// row, so the second run's EmbedMessagesResult.AlreadyEmbedded absorbs
+// all of them and Embedded is 0) — nothing in this method or
+// cmd/backfill_embeddings needs its own idempotency tracking.
+//
+// Unlike embedMessages (an internal step storeExtractedTriples always
+// calls after a successful triple write, where a nil Embedder is a valid,
+// silent no-op — most read methods work fine without one), a nil
+// Embedder here is a real caller misconfiguration worth surfacing:
+// backfilling embeddings IS the entire point of calling this, so silently
+// returning a zero-value, all-zero-counts result would look identical to
+// "ran successfully, nothing needed embedding" instead of "wasn't
+// configured to run at all" — a caller has no way to tell those apart
+// from EmbedMessagesResult alone.
+func (a *API) BackfillEmbeddings(ctx context.Context, messageIDs []uuid.UUID) (EmbedMessagesResult, error) {
+	if a.embedder == nil {
+		return EmbedMessagesResult{}, fmt.Errorf("BackfillEmbeddings: API has no Embedder configured — construct via New(..., embedder) with a non-nil embedder")
+	}
+	return a.embedMessages(ctx, messageIDs), nil
 }
