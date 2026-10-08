@@ -169,3 +169,57 @@ func TestParseExport_NarrowNoBreakSpaceBeforeAMPM(t *testing.T) {
 		t.Errorf("expected 1:38pm to parse as hour 13, got hour %d (PM marker was dropped)", m.Timestamp.Hour())
 	}
 }
+
+// TestParseExport_RejectsPathTraversalInAttachedFilename covers the
+// path-traversal audit finding's second, optional defense layer:
+// attachedFileRe's \S+ has no path-separator restriction of its own, so
+// a contact's export text containing a line like
+// "../../private/x.m4a (file attached)" would otherwise match and carry
+// a traversal path straight through as MediaURL — which
+// internal/api.localExportAudioFetcher (the actual file-access point)
+// independently guards against too, but this parser-level rejection
+// means the entry never gets that far at all, dropped the same way an
+// unrecognized extension already is (see classifyExportBody).
+func TestParseExport_RejectsPathTraversalInAttachedFilename(t *testing.T) {
+	sample := "[05/01/26, 09:10:00] Marco: ../../private/x.m4a (file attached)\n" +
+		"[05/01/26, 09:11:00] Marco: a normal message after it\n"
+
+	p := NewExportParser()
+	var dropped []string
+	p.Logger = func(format string, args ...any) { dropped = append(dropped, format) }
+
+	msgs, err := p.Parse(strings.NewReader(sample), "conv-traversal")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	for _, m := range msgs {
+		if m.MediaURL != nil && strings.ContainsAny(*m.MediaURL, `/\`) {
+			t.Fatalf("expected the path-traversal attachment to be dropped, got it through as MediaURL=%q", *m.MediaURL)
+		}
+	}
+	if len(msgs) != 1 || msgs[0].Text == nil || *msgs[0].Text != "a normal message after it" {
+		t.Fatalf("expected only the normal message to survive, got: %+v", msgs)
+	}
+	if len(dropped) == 0 {
+		t.Error("expected the rejected attachment to produce a log line, matching how other unresolvable entries are already handled")
+	}
+}
+
+// TestParseExport_RejectsAbsolutePathInAttachedFilename covers the same
+// gap for an absolute path, which contains no ".." at all — per the
+// audit's own note that a naive ".." substring check would miss this.
+func TestParseExport_RejectsAbsolutePathInAttachedFilename(t *testing.T) {
+	sample := "[05/01/26, 09:10:00] Marco: /etc/passwd.m4a (file attached)\n"
+
+	p := NewExportParser()
+	msgs, err := p.Parse(strings.NewReader(sample), "conv-abspath")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, m := range msgs {
+		if m.MediaURL != nil && strings.HasPrefix(*m.MediaURL, "/") {
+			t.Fatalf("expected the absolute-path attachment to be dropped, got it through as MediaURL=%q", *m.MediaURL)
+		}
+	}
+}
