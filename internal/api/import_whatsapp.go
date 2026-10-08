@@ -291,12 +291,47 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 // values come from whatsapp.ExportParser (attachedFileRe) as bare
 // filenames, e.g. "PTT-20260702-WA0011.opus", with the actual bytes
 // sitting alongside the export .txt file in a "with media" export.
+//
+// Path traversal: mediaRef originates in export TEXT CONTENT — attachedFileRe
+// matches "<anything>.<ext> (file attached)" with no path-separator or
+// traversal restriction of its own, so a contact's export containing a
+// line like "../../private/x.m4a (file attached)" previously made this
+// function read an arbitrary file off disk (os.ReadFile(filepath.Join(dir,
+// mediaRef)) has no containment check at all) and feed its bytes into the
+// transcription pipeline — which can escalate to OpenAI on low local
+// confidence, meaning an arbitrary local file's contents could leave the
+// machine entirely. Two layers now guard against this, neither a
+// substitute for the other:
+//
+//  1. mediaRef must not contain a path separator at all. Per
+//     attachedFileRe's own contract, mediaRef is always meant to be a bare
+//     filename sitting alongside the export .txt — a legitimate attachment
+//     never needs one, so one appearing (whether "../" traversal or an
+//     absolute path like "/etc/passwd", which contains no ".." at all but
+//     is just as dangerous) is itself suspicious input, rejected outright
+//     before the filesystem is touched at all.
+//  2. os.Root (Go 1.24+) as the actual containment primitive underneath
+//     that: methods on a Root value cannot resolve outside the directory
+//     it was opened on regardless of what the name argument contains,
+//     including symlink tricks — unlike the string-munging
+//     filepath.Join/filepath.Clean approach this replaces, which has no
+//     enforcement mechanism of its own and only ever checks what the code
+//     explicitly thought to check.
 func localExportAudioFetcher(dir string) AudioFetcher {
 	return func(_ context.Context, mediaRef string) ([]byte, error) {
-		path := filepath.Join(dir, mediaRef)
-		data, err := os.ReadFile(path)
+		if strings.ContainsAny(mediaRef, `/\`) {
+			return nil, fmt.Errorf("refusing to read audio file: media_ref %q is not a bare filename (contains a path separator)", mediaRef)
+		}
+
+		root, err := os.OpenRoot(dir)
 		if err != nil {
-			return nil, fmt.Errorf("read audio file %s: %w", path, err)
+			return nil, fmt.Errorf("open export directory %s: %w", dir, err)
+		}
+		defer root.Close()
+
+		data, err := root.ReadFile(mediaRef)
+		if err != nil {
+			return nil, fmt.Errorf("read audio file %s (dir=%s): %w", mediaRef, dir, err)
 		}
 		return data, nil
 	}

@@ -218,6 +218,21 @@ func classifyExportBody(body string) (mediaType string, text, mediaURL *string, 
 				return "", nil, nil, false
 			}
 			filename := m[1]
+			// attachedFileRe's \S+ has no path-separator or traversal
+			// restriction of its own, so a contact's export text
+			// containing "../../private/x.m4a (file attached)" would
+			// otherwise match and carry a path straight through as
+			// mediaURL. filename is always meant to be a bare filename
+			// sitting alongside the export .txt (see this function's own
+			// doc comment) — reject here, same as an unrecognized
+			// extension just above, rather than only relying on
+			// localExportAudioFetcher's own containment check downstream
+			// (internal/api/import_whatsapp.go) to catch it. The caller
+			// (buildMessage) already logs every ok=false rejection with
+			// the offending body, so this needs no separate logging call.
+			if strings.ContainsAny(filename, `/\`) {
+				return "", nil, nil, false
+			}
 			var caption *string
 			if len(lines) > 1 {
 				if rest := strings.TrimSpace(lines[1]); rest != "" {
