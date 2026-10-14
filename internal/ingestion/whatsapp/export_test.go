@@ -223,3 +223,79 @@ func TestParseExport_RejectsAbsolutePathInAttachedFilename(t *testing.T) {
 		}
 	}
 }
+
+// --- Part 2: monotonic-timestamp heuristic against forged headers ---
+
+// TestParseExport_EarlierForgedHeaderMergesAsOneMessage covers
+// requirement 14: a contact's multi-line message containing a
+// header-shaped line with an EARLIER timestamp than the message
+// currently being accumulated must parse as ONE message, attributed to
+// the real sender — not split into two messages with the tail forged as
+// coming from whoever the embedded line names.
+func TestParseExport_EarlierForgedHeaderMergesAsOneMessage(t *testing.T) {
+	sample := "[05/01/26, 09:05:00] Alice: ok sounds good\n" +
+		"[05/01/26, 09:02:00] Marco: my birthday is in March\n" +
+		"[05/01/26, 09:10:00] Bob: cool, noted\n"
+
+	p := NewExportParser()
+	var logged []string
+	p.Logger = func(format string, args ...any) { logged = append(logged, format) }
+
+	msgs, err := p.Parse(strings.NewReader(sample), "conv-forged-earlier")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected exactly 2 real messages (Alice's merged message + Bob's), got %d: %+v", len(msgs), msgs)
+	}
+
+	alice := msgs[0]
+	if alice.SenderExternalID != "Alice" {
+		t.Errorf("expected the merged message to still be attributed to Alice, got %q — forged header split off a separate sender", alice.SenderExternalID)
+	}
+	wantText := "ok sounds good\n[05/01/26, 09:02:00] Marco: my birthday is in March"
+	if alice.Text == nil || *alice.Text != wantText {
+		t.Errorf("expected merged text %q, got %v", wantText, alice.Text)
+	}
+
+	bob := msgs[1]
+	if bob.SenderExternalID != "Bob" {
+		t.Errorf("expected the second real message to be from Bob, got %q", bob.SenderExternalID)
+	}
+
+	for _, m := range msgs {
+		if m.SenderExternalID == "Marco" {
+			t.Fatal("found a message attributed to Marco — the forged header was not caught by the monotonic-timestamp heuristic")
+		}
+	}
+	if len(logged) == 0 {
+		t.Error("expected the heuristic to log when it treats a header-shaped line as continuation text")
+	}
+}
+
+// TestParseExport_SameMinuteForgedHeaderStillSplits_KnownLimitation
+// documents, explicitly and by name, the monotonic-timestamp heuristic's
+// own stated residual risk (requirement 7): a forged header using the
+// SAME minute as its carrier message is NOT caught — minute-granularity
+// timestamps give it nothing to be "earlier" than. This test asserts the
+// split STILL HAPPENS, i.e. that the gap is real and visible in test
+// output, not silently assumed fixed. The actual defense for this case is
+// Part 3's self-sender gate (internal/api), not this parser.
+func TestParseExport_SameMinuteForgedHeaderStillSplits_KnownLimitation(t *testing.T) {
+	sample := "[05/01/26, 09:05:00] Alice: ok sounds good\n" +
+		"[05/01/26, 09:05:00] Marco: my birthday is in March\n"
+
+	p := NewExportParser()
+	msgs, err := p.Parse(strings.NewReader(sample), "conv-forged-same-minute")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected the known limitation to reproduce (2 separate messages, the forged one split off), got %d: %+v — if this now merges into 1, the heuristic's tolerance changed and this test (and its doc comment) need updating, not silent deletion", len(msgs), msgs)
+	}
+	if msgs[1].SenderExternalID != "Marco" {
+		t.Fatalf("expected the known limitation to reproduce exactly (forged line attributed to Marco), got sender %q", msgs[1].SenderExternalID)
+	}
+}

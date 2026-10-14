@@ -101,10 +101,51 @@ type pendingMessage struct {
 	lines            []string
 }
 
+// headerTimestampTolerance is the monotonic-timestamp heuristic's
+// (Parse's own doc comment below) tolerance for minute-granularity
+// exports: WhatsApp's Android-style export format carries no seconds, so
+// two genuinely consecutive real messages can legitimately share the
+// same displayed minute. Only a header-shaped line MORE than this far
+// before the currently-open message's own timestamp is treated as
+// forged/continuation text — see Parse's own doc comment for the
+// residual risk this leaves.
+const headerTimestampTolerance = 1 * time.Minute
+
 // Parse reads a WhatsApp .txt export and returns the messages it contains as
 // RawMessage values, in file order. conversationID is supplied by the
 // caller (the export file itself carries no chat/group JID) — this is
 // wiring, not a classification decision.
+//
+// Forged-header mitigation (prompt-injection/forged-attribution fix):
+// this format cannot be made unambiguous — any line shaped like
+// "[timestamp] Sender: text" is indistinguishable from a real message
+// header, so a contact's own multi-line message that happens to CONTAIN
+// such a line (e.g. pasting someone else's forwarded text, or a
+// deliberately crafted message) gets split here, and the tail is
+// attributed to whatever sender name appears in that embedded line —
+// including, say, "Marco", even though Marco never sent it.
+//
+// Real WhatsApp exports are chronological: a genuine new message's
+// timestamp is never earlier than the message before it. This is a
+// MITIGATION, not a fix, built on that one real invariant: a header-shaped
+// line whose own parsed timestamp is more than headerTimestampTolerance
+// earlier than the currently-pending message's timestamp is treated as
+// continuation text of that pending message (logged), not a new message
+// boundary — it catches a forged header that picks an out-of-order time,
+// which is the natural thing to pick if you're not specifically trying to
+// evade this exact heuristic.
+//
+// Residual risk, stated plainly: a forged header using the SAME MINUTE as
+// its carrier message (or a later one) passes this heuristic completely —
+// minute-granularity timestamps give an attacker room to simply match or
+// exceed the carrier message's own displayed time. This is not caught by
+// anything in this parser. The real defense against the only exploit path
+// that matters (a forged "Marco" message being trusted as a genuine
+// correction) is Part 3's self-sender gate in internal/api's
+// storeExtractedTriples, which never trusts a speaker name parsed from
+// export text at all — this heuristic reduces how often a forged header
+// can even masquerade as a separate message in the first place, it does
+// not make that masquerade impossible.
 func (p *ExportParser) Parse(r io.Reader, conversationID string) ([]ingestion.RawMessage, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -126,6 +167,11 @@ func (p *ExportParser) Parse(r io.Reader, conversationID string) ([]ingestion.Ra
 		line := scanner.Text()
 
 		if m := headerRe.FindStringSubmatch(line); m != nil {
+			if pending != nil && p.looksLikeForgedHeader(m[1], m[2], pending) {
+				pending.lines = append(pending.lines, line)
+				continue
+			}
+
 			flush()
 			pending = &pendingMessage{
 				dateStr: m[1],
@@ -161,6 +207,30 @@ func (p *ExportParser) Parse(r io.Reader, conversationID string) ([]ingestion.Ra
 	}
 
 	return out, nil
+}
+
+// looksLikeForgedHeader reports whether a header-shaped line (already
+// matched by headerRe, dateStr/timeStr being its captured timestamp)
+// should be treated as continuation text of pending rather than a new
+// message — see Parse's own doc comment for the heuristic and its
+// residual risk. An unparseable candidate or pending timestamp falls back
+// to the original behavior (treat as a new message) rather than guessing.
+func (p *ExportParser) looksLikeForgedHeader(dateStr, timeStr string, pending *pendingMessage) bool {
+	candidateTS, err := parseExportTimestamp(dateStr, timeStr)
+	if err != nil {
+		return false
+	}
+	pendingTS, err := parseExportTimestamp(pending.dateStr, pending.timeStr)
+	if err != nil {
+		return false
+	}
+
+	if candidateTS.Before(pendingTS.Add(-headerTimestampTolerance)) {
+		p.logf("whatsapp export: header-shaped line at %s %s is earlier than the current message's timestamp (%s %s) beyond tolerance — treating as continuation text, not a new message (see Parse's own doc comment on this heuristic's residual risk)",
+			dateStr, timeStr, pending.dateStr, pending.timeStr)
+		return true
+	}
+	return false
 }
 
 func (p *ExportParser) buildMessage(pm pendingMessage, conversationID string) (ingestion.RawMessage, bool) {

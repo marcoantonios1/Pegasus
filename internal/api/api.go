@@ -99,6 +99,8 @@ type API struct {
 	audioFetcher        AudioFetcher
 	transcriptionConfig TranscriptionConfig
 
+	honorCorrectionsOnImport bool
+
 	liveWindowsMu sync.Mutex
 	liveWindows   map[uuid.UUID]*liveConversationState
 }
@@ -167,6 +169,37 @@ type PipelineDeps struct {
 	Transcriber         Transcriber
 	AudioFetcher        AudioFetcher
 	TranscriptionConfig TranscriptionConfig
+
+	// HonorCorrectionsOnImport controls whether ImportWhatsApp honors
+	// is_correction=true triples at all (prompt-injection/forged-
+	// attribution fix, Part 4). Default false — ImportWhatsApp forces
+	// every triple it gets back from extraction to IsCorrection=false
+	// before storeExtractedTriples ever sees it, regardless of what the
+	// self-sender gate (storeExtractedTriples' own doc comment) would
+	// have decided.
+	//
+	// Why default false specifically for IMPORT and not for the live
+	// path: Part 2's monotonic-timestamp heuristic (internal/ingestion/
+	// whatsapp/export.go) is explicitly a MITIGATION, not a fix — a
+	// forged header using the same minute as its carrier message still
+	// passes it. That means a historical WhatsApp .txt import can still,
+	// in principle, have a forged message wrongly attributed to the self
+	// sender by the PARSER itself, before storeExtractedTriples' gate
+	// (which trusts stored sender_id) ever gets a chance to catch
+	// anything — the gate is only as trustworthy as the sender_id it's
+	// checking, and for import that sender_id came from export TEXT
+	// parsing, not a verified identity. ProcessLiveMessage has no
+	// equivalent gap: live sender identity comes from the Whatsmeow
+	// event itself, not text parsing (see resolveSender's own doc
+	// comment), so Part 3's gate alone is the correct and sufficient
+	// check there — ProcessLiveMessage always honors corrections,
+	// unconditionally, with no separate config.
+	//
+	// A correction skipped on import isn't lost: the extraction prompt
+	// itself already states a missed correction still lands as a new
+	// fact, correctable later (prompt.go). Marco can set this true if he
+	// accepts the residual forged-header risk for his own imports.
+	HonorCorrectionsOnImport bool
 }
 
 // WithPipeline attaches write-pipeline dependencies to an already-
@@ -181,6 +214,7 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	a.transcriber = deps.Transcriber
 	a.audioFetcher = deps.AudioFetcher
 	a.transcriptionConfig = deps.TranscriptionConfig
+	a.honorCorrectionsOnImport = deps.HonorCorrectionsOnImport
 
 	a.selfExternalIDs = make(map[string]bool, len(deps.SelfExternalIDs))
 	for _, id := range deps.SelfExternalIDs {

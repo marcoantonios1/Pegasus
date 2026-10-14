@@ -29,15 +29,36 @@ type ExtractedTriple struct {
 	ObjectType   string // "entity" | "literal"
 	Confidence   float64
 	IsCorrection bool
+
+	// CorrectionSourceIndex is the "i" value (prompt.go's conversationLine)
+	// of the window-local conversation line the model says this
+	// correction came from — present only when IsCorrection is true, nil
+	// otherwise (ValidateTriples does not require it to be set even when
+	// IsCorrection is true; that gate lives in internal/api's
+	// storeExtractedTriples, not here — see its own doc comment).
+	//
+	// This is NOT a verified identity and must never be trusted as one:
+	// it is the model's own self-report, parsed out of model output the
+	// same as every other field here, extracted from a prompt built out
+	// of untrusted conversation content. Prompt-injection/forged-
+	// attribution fix (storeExtractedTriples' own doc comment has the
+	// full reasoning): whether the message at this index was ACTUALLY
+	// sent by the self entity is checked against STORED, trusted data
+	// (the message's own sender_id, resolved to an entity, checked for
+	// IsSelf) before is_correction is ever honored — never against
+	// anything the model reported, including a speaker name it might
+	// also echo back.
+	CorrectionSourceIndex *int
 }
 
 type rawTriple struct {
-	Subject      string  `json:"subject"`
-	Predicate    string  `json:"predicate"`
-	Object       string  `json:"object"`
-	ObjectType   string  `json:"object_type"`
-	Confidence   float64 `json:"confidence"`
-	IsCorrection bool    `json:"is_correction"`
+	Subject               string  `json:"subject"`
+	Predicate             string  `json:"predicate"`
+	Object                string  `json:"object"`
+	ObjectType            string  `json:"object_type"`
+	Confidence            float64 `json:"confidence"`
+	IsCorrection          bool    `json:"is_correction"`
+	CorrectionSourceIndex *int    `json:"correction_source_index,omitempty"`
 }
 
 // ParseModelOutput parses the model's raw text response into triples. §8.2
@@ -58,12 +79,13 @@ func ParseModelOutput(raw string) ([]ExtractedTriple, error) {
 	triples := make([]ExtractedTriple, len(rawTriples))
 	for i, rt := range rawTriples {
 		triples[i] = ExtractedTriple{
-			Subject:      rt.Subject,
-			Predicate:    rt.Predicate,
-			Object:       rt.Object,
-			ObjectType:   rt.ObjectType,
-			Confidence:   rt.Confidence,
-			IsCorrection: rt.IsCorrection,
+			Subject:               rt.Subject,
+			Predicate:             rt.Predicate,
+			Object:                rt.Object,
+			ObjectType:            rt.ObjectType,
+			Confidence:            rt.Confidence,
+			IsCorrection:          rt.IsCorrection,
+			CorrectionSourceIndex: rt.CorrectionSourceIndex,
 		}
 	}
 	return triples, nil
@@ -91,6 +113,21 @@ type Logger func(format string, args ...any)
 // A coder-tuned model with a hard-constrained list should rarely trigger
 // this, but "rarely" isn't "never," which is the whole reason this step
 // exists rather than trusting the prompt alone.
+//
+// CorrectionSourceIndex is deliberately NOT validated here beyond the
+// shape-level acceptance *int already gives it: ParseModelOutput's
+// json.Unmarshal into an *int destination already rejects a non-integer
+// value (a JSON number with a fractional/exponent part, a string, an
+// object — anything that isn't a bare integer) by failing the WHOLE
+// response's decode, the same hard-parse-error behavior any other
+// malformed field already gets — no extra per-field code needed for
+// that. Whether an is_correction=true triple's index is present, in
+// range, and actually resolves to the self entity is a TRUST decision
+// against stored data, not a shape/vocabulary one — that check lives in
+// internal/api's storeExtractedTriples (the self-sender gate), which also
+// owns the fail-safe "downgrade to a normal claim" behavior for a
+// missing/out-of-range/non-self index. This function only ever decides
+// whether a triple's SHAPE is acceptable, never who's trusted.
 func ValidateTriples(triples []ExtractedTriple, logf Logger) []ExtractedTriple {
 	if logf == nil {
 		logf = func(format string, args ...any) { log.Printf(format, args...) }

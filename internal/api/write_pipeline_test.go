@@ -38,10 +38,20 @@ func (f *fakeTriager) IsWindowCandidate(ctx context.Context, w extraction.Window
 type fakeExtractor struct {
 	triples []extraction.ExtractedTriple
 	calls   int
+	// lastWindow captures the window ExtractWindow was last called with —
+	// additive (every existing fakeExtractor use predates this field and
+	// doesn't read it) — so a test can inspect what ProcessLiveMessage/
+	// ImportWhatsApp actually assembled and handed to extraction, e.g.
+	// building the real prompt from it via extraction.BuildPrompt to
+	// confirm the prompt-injection fix's JSONL encoding holds end-to-end
+	// through the real live-windowing path, not just in prompt.go's own
+	// unit tests.
+	lastWindow extraction.Window
 }
 
 func (f *fakeExtractor) ExtractWindow(ctx context.Context, w extraction.Window) ([]extraction.ExtractedTriple, error) {
 	f.calls++
+	f.lastWindow = w
 	return f.triples, nil
 }
 
