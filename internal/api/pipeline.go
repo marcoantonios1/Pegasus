@@ -178,6 +178,35 @@ const (
 // a "corrected" edge with nothing to supersede or silently falling back
 // to a normal Create, which would misrepresent an explicit correction
 // signal as an ordinary new fact.
+//
+// Self-sender gate (prompt-injection / forged-attribution fix, Part 3):
+// is_correction=true, on its own, is just the model's say-so — a
+// correction's whole effect (confidence forced to 1.0, decay_locked so
+// it's NEVER pruned, superseding an existing edge outright) makes it the
+// single highest-trust, hardest-to-undo write path in this entire
+// pipeline, and extraction.ExtractedTriple.CorrectionSourceIndex's own
+// doc comment is explicit that it's exactly as untrusted as every other
+// model-reported field — parsed out of a response to a prompt built from
+// untrusted conversation content. A contact's message, structurally
+// forged to look like a message from Marco (Part 1's prompt-encoding fix
+// narrows this, Part 2's parser heuristic narrows it further for
+// historical imports, but neither claims to make it impossible — see
+// each one's own doc comment) could otherwise talk the model into
+// emitting is_correction=true and getting it trusted outright.
+//
+// The actual gate: before honoring is_correction at all, resolve
+// CorrectionSourceIndex to one of sourceMessageIDs, load THAT MESSAGE'S
+// OWN STORED sender_id (not anything the model said), resolve it to an
+// entity, and require entity.IsSelf — true identity, independent of
+// whatever a model-generated triple claims. Fail safe
+// (isCorrectionFromSelf's own doc comment has the exact conditions): a
+// missing index, an out-of-range index, a sender that isn't self, or any
+// lookup failure all DOWNGRADE the triple to an ordinary claim rather
+// than erroring the whole call out — the triple still falls through to
+// the exact same Create/Reinforce path every non-correction triple uses
+// below, so "downgraded" and "never claimed a correction at all" are
+// LITERALLY the same code path, not two implementations that need to be
+// kept in sync by hand.
 func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.ExtractedTriple, sourceType string, sourceMessageIDs []uuid.UUID, now time.Time) ([]TripleOutcome, error) {
 	var outcomes []TripleOutcome
 
@@ -200,7 +229,17 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			objectLiteral = &lit
 		}
 
-		if triple.IsCorrection {
+		honorCorrection := triple.IsCorrection
+		if honorCorrection {
+			ok, reason := a.isCorrectionFromSelf(ctx, triple.CorrectionSourceIndex, sourceMessageIDs)
+			if !ok {
+				a.logf("storeExtractedTriples: downgrading is_correction triple to a normal claim (subject=%q predicate=%q object=%q): %s",
+					triple.Subject, triple.Predicate, triple.Object, reason)
+				honorCorrection = false
+			}
+		}
+
+		if honorCorrection {
 			existing, err := a.edges.FindMatchingEdge(ctx, subject.ID, triple.Predicate, objectID, objectLiteral)
 			if err != nil {
 				return outcomes, fmt.Errorf("find edge to correct (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
@@ -226,6 +265,9 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			continue
 		}
 
+		// Reached either because the model never claimed is_correction,
+		// or because it did but the self-sender gate above downgraded it
+		// — exactly one normal-claim code path either way.
 		existing, err := a.edges.FindMatchingEdge(ctx, subject.ID, triple.Predicate, objectID, objectLiteral)
 		if err != nil {
 			return outcomes, fmt.Errorf("find matching edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
@@ -271,6 +313,55 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 	a.embedMessages(ctx, sourceMessageIDs)
 
 	return outcomes, nil
+}
+
+// isCorrectionFromSelf is the actual trust check behind Part 3's
+// self-sender gate (storeExtractedTriples' own doc comment has the full
+// threat-model reasoning) — resolves idx (the model-reported
+// CorrectionSourceIndex) to one of sourceMessageIDs, loads THAT
+// MESSAGE'S OWN STORED sender_id, resolves it to an entity, and reports
+// whether that entity IsSelf. ok=false covers every way this can fail to
+// qualify — never an error return, since the caller's job either way is
+// the same "downgrade to a normal claim" (storeExtractedTriples), not a
+// different code path per failure reason; reason is a log-friendly
+// explanation of WHICH way it failed, for storeExtractedTriples' own
+// downgrade log line.
+//
+// Lockstep assumption this relies on — confirmed, not assumed: idx is a
+// window-local position (extraction.conversationLine's "i"), and
+// sourceMessageIDs[idx] must be the message that produced
+// conversationLine i. For ImportWhatsApp this holds by construction
+// (windowWithMessageIDs partitions messageIDs using the exact same
+// offsets WindowByCount itself uses — see that function's own doc
+// comment). For ProcessLiveMessage this also holds: extraction.
+// LiveWindower.Add appends to w.pending and hands back that same slice
+// as the completed Window's Messages (window.go) — strict FIFO, the same
+// order ProcessLiveMessage appends to its own parallel pendingIDs slice
+// in, so completedIDs[i] and completed.Messages[i] always refer to the
+// same real message.
+func (a *API) isCorrectionFromSelf(ctx context.Context, idx *int, sourceMessageIDs []uuid.UUID) (ok bool, reason string) {
+	if idx == nil {
+		return false, "correction_source_index missing"
+	}
+	if *idx < 0 || *idx >= len(sourceMessageIDs) {
+		return false, fmt.Sprintf("correction_source_index %d out of range [0,%d)", *idx, len(sourceMessageIDs))
+	}
+
+	msgID := sourceMessageIDs[*idx]
+	msg, err := a.messages.GetByID(ctx, msgID)
+	if err != nil {
+		return false, fmt.Sprintf("load message %s: %v", msgID, err)
+	}
+
+	sender, err := a.entities.GetByID(ctx, msg.SenderID)
+	if err != nil {
+		return false, fmt.Sprintf("load sender entity for message %s: %v", msgID, err)
+	}
+	if !sender.IsSelf {
+		return false, fmt.Sprintf("message %s's sender (%s) is not the self entity", msgID, sender.CanonicalName)
+	}
+
+	return true, ""
 }
 
 // messageText returns the text content to embed for msg: raw_text if

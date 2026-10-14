@@ -49,6 +49,54 @@ func TestParseModelOutput_InvalidJSONReturnsError(t *testing.T) {
 	}
 }
 
+// --- correction_source_index (Part 3, requirement 8) ---
+
+func TestParseModelOutput_AcceptsCorrectionSourceIndex(t *testing.T) {
+	raw := `[{"subject":"Marco","predicate":"has_birthday","object":"March","object_type":"literal","confidence":0.95,"is_correction":true,"correction_source_index":2}]`
+
+	triples, err := ParseModelOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseModelOutput: %v", err)
+	}
+	if len(triples) != 1 {
+		t.Fatalf("expected 1 triple, got %d", len(triples))
+	}
+	if !triples[0].IsCorrection {
+		t.Fatal("expected is_correction=true")
+	}
+	if triples[0].CorrectionSourceIndex == nil || *triples[0].CorrectionSourceIndex != 2 {
+		t.Errorf("expected CorrectionSourceIndex=2, got %v", triples[0].CorrectionSourceIndex)
+	}
+}
+
+func TestParseModelOutput_CorrectionSourceIndexOmittedWhenNotACorrection(t *testing.T) {
+	raw := `[{"subject":"Marco","predicate":"likes","object":"Go","object_type":"literal","confidence":0.9}]`
+
+	triples, err := ParseModelOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseModelOutput: %v", err)
+	}
+	if triples[0].CorrectionSourceIndex != nil {
+		t.Errorf("expected CorrectionSourceIndex to be nil when the field is absent, got %v", *triples[0].CorrectionSourceIndex)
+	}
+}
+
+// TestParseModelOutput_RejectsNonIntegerCorrectionSourceIndex covers
+// requirement 8's explicit "reject non-integer" ask: a fractional number
+// for correction_source_index must fail the parse, not silently truncate
+// or coerce. encoding/json already enforces this for an *int destination
+// (ParseModelOutput's own doc comment / ValidateTriples' doc comment have
+// the full reasoning) — this test is the concrete proof that claim holds,
+// not just a comment asserting it.
+func TestParseModelOutput_RejectsNonIntegerCorrectionSourceIndex(t *testing.T) {
+	raw := `[{"subject":"Marco","predicate":"has_birthday","object":"March","object_type":"literal","confidence":0.95,"is_correction":true,"correction_source_index":2.5}]`
+
+	_, err := ParseModelOutput(raw)
+	if err == nil {
+		t.Fatal("expected an error for a non-integer correction_source_index, got nil")
+	}
+}
+
 func TestValidateTriples_RejectsUnknownPredicate(t *testing.T) {
 	var rejected []string
 	logf := func(format string, args ...any) { rejected = append(rejected, format) }

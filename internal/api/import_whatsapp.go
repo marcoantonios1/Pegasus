@@ -255,6 +255,25 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			return result, fmt.Errorf("ImportWhatsApp: extract window %d/%d: %w", i+1, len(windows), err)
 		}
 
+		// Import policy (prompt-injection/forged-attribution fix, Part 4
+		// — see PipelineDeps.HonorCorrectionsOnImport's own doc comment
+		// for why historical import specifically needs this, unlike the
+		// live path): forced to a normal claim BEFORE storeExtractedTriples
+		// ever sees it, by default — not relying on its self-sender gate
+		// alone, since for a historical import that gate's own trust
+		// anchor (stored sender_id) traces back to export TEXT parsing,
+		// which Part 2's heuristic only mitigates, not fixes.
+		if !a.honorCorrectionsOnImport {
+			for ti := range triples {
+				if triples[ti].IsCorrection {
+					a.logf("ImportWhatsApp %s: is_correction triple downgraded to a normal claim per HonorCorrectionsOnImport=false (subject=%q predicate=%q object=%q)",
+						externalConversationID, triples[ti].Subject, triples[ti].Predicate, triples[ti].Object)
+					triples[ti].IsCorrection = false
+					triples[ti].CorrectionSourceIndex = nil
+				}
+			}
+		}
+
 		// A window can legitimately mix text and voice-transcribed
 		// messages — see windowSourceType's own doc comment (this is the
 		// same bug class the live path had, now fixed there too).
