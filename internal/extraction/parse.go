@@ -49,6 +49,24 @@ type ExtractedTriple struct {
 	// anything the model reported, including a speaker name it might
 	// also echo back.
 	CorrectionSourceIndex *int
+
+	// ReplacesObject is the previous (wrong) value a correction is
+	// replacing, as stated or clearly implied in the conversation — nil
+	// if not stated (requirement 3, Issue 32's fix). Present only when
+	// IsCorrection is true, and optional even then — the model may not
+	// always have the old value available (e.g. a bare "actually that's
+	// wrong" with no restated prior value).
+	//
+	// Same untrusted-model-output posture as CorrectionSourceIndex: used
+	// ONLY to disambiguate among several already-STORED live candidate
+	// edges when internal/api's storeExtractedTriples selects what to
+	// supersede — it can never create or alter anything on its own, and a
+	// wrong/hallucinated value here just means the selection finds no
+	// match (or the wrong one, if two candidates coincidentally share a
+	// similar old value) and skips rather than guesses — see
+	// storeExtractedTriples' own doc comment for the full selection
+	// rules.
+	ReplacesObject *string
 }
 
 type rawTriple struct {
@@ -59,6 +77,7 @@ type rawTriple struct {
 	Confidence            float64 `json:"confidence"`
 	IsCorrection          bool    `json:"is_correction"`
 	CorrectionSourceIndex *int    `json:"correction_source_index,omitempty"`
+	ReplacesObject        *string `json:"replaces_object,omitempty"`
 }
 
 // ParseModelOutput parses the model's raw text response into triples. §8.2
@@ -86,6 +105,7 @@ func ParseModelOutput(raw string) ([]ExtractedTriple, error) {
 			Confidence:            rt.Confidence,
 			IsCorrection:          rt.IsCorrection,
 			CorrectionSourceIndex: rt.CorrectionSourceIndex,
+			ReplacesObject:        rt.ReplacesObject,
 		}
 	}
 	return triples, nil
@@ -114,20 +134,24 @@ type Logger func(format string, args ...any)
 // this, but "rarely" isn't "never," which is the whole reason this step
 // exists rather than trusting the prompt alone.
 //
-// CorrectionSourceIndex is deliberately NOT validated here beyond the
-// shape-level acceptance *int already gives it: ParseModelOutput's
-// json.Unmarshal into an *int destination already rejects a non-integer
-// value (a JSON number with a fractional/exponent part, a string, an
-// object — anything that isn't a bare integer) by failing the WHOLE
-// response's decode, the same hard-parse-error behavior any other
-// malformed field already gets — no extra per-field code needed for
-// that. Whether an is_correction=true triple's index is present, in
-// range, and actually resolves to the self entity is a TRUST decision
-// against stored data, not a shape/vocabulary one — that check lives in
-// internal/api's storeExtractedTriples (the self-sender gate), which also
-// owns the fail-safe "downgrade to a normal claim" behavior for a
-// missing/out-of-range/non-self index. This function only ever decides
-// whether a triple's SHAPE is acceptable, never who's trusted.
+// CorrectionSourceIndex and ReplacesObject are deliberately NOT validated
+// here beyond the shape-level acceptance their Go types already give
+// them: ParseModelOutput's json.Unmarshal into an *int/*string
+// destination already rejects a malformed value (a non-integer index, a
+// non-string replaces_object) by failing the WHOLE response's decode,
+// the same hard-parse-error behavior any other malformed field already
+// gets — no extra per-field code needed for that. Whether an
+// is_correction=true triple's index is present, in range, and actually
+// resolves to the self entity is a TRUST decision against stored data,
+// not a shape/vocabulary one; which live edge (if any) ReplacesObject
+// should select among is a SELECTION decision against stored data, not a
+// shape one either. Both checks live in internal/api's
+// storeExtractedTriples (the self-sender gate and the correction-target
+// selection, respectively), which also own the fail-safe "downgrade to a
+// normal claim" / "skip rather than guess" behavior for every way either
+// can fail to resolve cleanly. This function only ever decides whether a
+// triple's SHAPE is acceptable, never who's trusted or what gets
+// superseded.
 func ValidateTriples(triples []ExtractedTriple, logf Logger) []ExtractedTriple {
 	if logf == nil {
 		logf = func(format string, args ...any) { log.Printf(format, args...) }

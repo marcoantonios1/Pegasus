@@ -150,18 +150,11 @@ func TestStoreExtractedTriples_CorrectionWithOutOfRangeIndexIsDowngraded(t *test
 // self-sent message instead, must route through the real correction
 // path.
 //
-// The pre-existing edge here deliberately uses the SAME object value the
-// "correction" triple itself reports ("March"). This is not incidental:
-// FindMatchingEdge (storeExtractedTriples' own doc comment explains the
-// interaction) is called with the triple's OWN new object, so it can only
-// ever match an edge that already has that exact value — the real-world
-// "April -> March" correction case finds nothing and gets skipped
-// (TripleActionSkippedNoCorrectionTarget) regardless of this gate, which
-// is Issue 32's own bug, not something this fix changes. This test's job
-// is only to prove the GATE lets a legitimate self-sourced correction
-// through to CorrectMemory at all — not to re-validate Issue 32's
-// matching logic, which is a separate, not-yet-fixed issue this one does
-// not touch (see the PR description for the full interaction).
+// Issue 32's fix means this can now be a GENUINE correction (old value
+// "April" superseded by new value "March", via ReplacesObject) rather
+// than the same-object workaround this test needed before that fix
+// landed — see selectCorrectionTarget's own doc comment for the
+// selection rules this now exercises for real.
 func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
@@ -186,7 +179,7 @@ func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testi
 	subjectName := "Counter Test Subject " + uuid.New().String()
 	subject := createTestEntity(t, ctx, ts, "person", subjectName)
 
-	existingLit := "March"
+	existingLit := "April"
 	existingEdge := &memory.Edge{
 		SubjectID: subject.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
 		Confidence: 0.7, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0,
@@ -199,8 +192,9 @@ func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testi
 	msg := createTestMessage(t, ctx, ts, uuid.New(), selfEntity.ID, "text", time.Now())
 
 	idx := 0
+	oldValue := "April"
 	triples := []extraction.ExtractedTriple{
-		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.95, IsCorrection: true, CorrectionSourceIndex: &idx},
+		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.95, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 	}
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
@@ -298,7 +292,7 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 
 	subjectName := "Honor True Subject " + uuid.New().String()
 	subject := createTestEntity(t, ctx, ts, "person", subjectName)
-	existingLit := "March"
+	existingLit := "April"
 	existingEdge := &memory.Edge{
 		SubjectID: subject.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
 		Confidence: 0.7, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0,
@@ -309,8 +303,9 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 	}
 
 	idx := 0
+	oldValue := "April"
 	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
-		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx},
+		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 	}}
 	triager := &fakeTriager{candidate: true}
 
