@@ -2,9 +2,12 @@ package memory
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,9 +23,9 @@ func (s *MessageStore) Create(ctx context.Context, m *Message) error {
 	return s.db.QueryRow(ctx, `
 		INSERT INTO messages (
 			conversation_id, sender_id, media_type, raw_text, transcript,
-			transcript_confidence, media_ref, processed, timestamp
+			transcript_confidence, media_ref, processed, timestamp, external_id
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 		)
 		RETURNING id
 	`,
@@ -35,7 +38,104 @@ func (s *MessageStore) Create(ctx context.Context, m *Message) error {
 		m.MediaRef,
 		m.Processed,
 		m.Timestamp,
+		m.ExternalID,
 	).Scan(&m.ID)
+}
+
+// CreateIfAbsent is Create's idempotent counterpart (the message-ingestion
+// idempotency fix): if m.ExternalID is set and a row already exists for
+// (m.ConversationID, *m.ExternalID) — the partial unique index migration
+// 000007 added — nothing new is inserted; instead m is overwritten in
+// place with the EXISTING row's full contents (ID, Processed, Transcript/
+// TranscriptConfidence in particular — a caller resuming an interrupted
+// import needs to see what's actually stored, not what it was about to
+// write), and created=false is returned. Otherwise a new row is inserted
+// exactly like Create, and created=true.
+//
+// Atomic by construction, not check-then-insert: a single INSERT ...
+// ON CONFLICT ... DO NOTHING, falling back to a SELECT only when nothing
+// was actually inserted. This matters because message ingestion is NOT
+// single-threaded in practice — Whatsmeow can redeliver a live message
+// while a historical re-import of the same conversation is also running,
+// and a naive "SELECT, then INSERT if not found" would race: both could
+// see "not found" and both insert, defeating the whole point of this
+// method.
+//
+// m.ExternalID == nil (an adapter had no real ID for this message — see
+// Message.ExternalID's own doc comment) always inserts: there's no dedup
+// key to conflict on, so this degrades to exactly Create's behavior,
+// created=true unconditionally. Callers are expected to log this case
+// themselves (see internal/api's messageExternalID) — this method has no
+// visibility into WHY ExternalID is nil, only that it is.
+func (s *MessageStore) CreateIfAbsent(ctx context.Context, m *Message) (created bool, err error) {
+	if m.ExternalID == nil {
+		if err := s.Create(ctx, m); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	err = s.db.QueryRow(ctx, `
+		INSERT INTO messages (
+			conversation_id, sender_id, media_type, raw_text, transcript,
+			transcript_confidence, media_ref, processed, timestamp, external_id
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		)
+		ON CONFLICT (conversation_id, external_id) WHERE external_id IS NOT NULL DO NOTHING
+		RETURNING id
+	`,
+		m.ConversationID,
+		m.SenderID,
+		m.MediaType,
+		m.RawText,
+		m.Transcript,
+		m.TranscriptConfidence,
+		m.MediaRef,
+		m.Processed,
+		m.Timestamp,
+		m.ExternalID,
+	).Scan(&m.ID)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+
+	// ON CONFLICT ... DO NOTHING inserted nothing (RETURNING produced no
+	// row) — the conflicting row already exists; load it so the caller's
+	// m reflects what's actually stored.
+	existing, err := s.getByConversationAndExternalID(ctx, m.ConversationID, *m.ExternalID)
+	if err != nil {
+		return false, fmt.Errorf("load existing message (conversation_id=%s external_id=%s): %w", m.ConversationID, *m.ExternalID, err)
+	}
+	*m = *existing
+	return false, nil
+}
+
+// getByConversationAndExternalID is CreateIfAbsent's own lookup for the
+// "already exists" branch — not exported, since (conversation_id,
+// external_id) is an ingestion-pipeline concept (adapter-provided IDs),
+// not a general query any other caller has needed so far.
+func (s *MessageStore) getByConversationAndExternalID(ctx context.Context, conversationID uuid.UUID, externalID string) (*Message, error) {
+	var m Message
+
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			id, conversation_id, sender_id, media_type, raw_text, transcript,
+			transcript_confidence, media_ref, processed, timestamp, external_id
+		FROM messages
+		WHERE conversation_id = $1 AND external_id = $2
+	`, conversationID, externalID).Scan(
+		&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
+		&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &m, nil
 }
 
 func (s *MessageStore) GetByID(ctx context.Context, id uuid.UUID) (*Message, error) {
@@ -44,12 +144,12 @@ func (s *MessageStore) GetByID(ctx context.Context, id uuid.UUID) (*Message, err
 	err := s.db.QueryRow(ctx, `
 		SELECT
 			id, conversation_id, sender_id, media_type, raw_text, transcript,
-			transcript_confidence, media_ref, processed, timestamp
+			transcript_confidence, media_ref, processed, timestamp, external_id
 		FROM messages
 		WHERE id = $1
 	`, id).Scan(
 		&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
-		&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+		&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
 	)
 	if err != nil {
 		return nil, err
@@ -64,8 +164,8 @@ func (s *MessageStore) Update(ctx context.Context, m *Message) error {
 		SET
 			conversation_id = $1, sender_id = $2, media_type = $3, raw_text = $4,
 			transcript = $5, transcript_confidence = $6, media_ref = $7,
-			processed = $8, timestamp = $9
-		WHERE id = $10
+			processed = $8, timestamp = $9, external_id = $10
+		WHERE id = $11
 	`,
 		m.ConversationID,
 		m.SenderID,
@@ -76,6 +176,7 @@ func (s *MessageStore) Update(ctx context.Context, m *Message) error {
 		m.MediaRef,
 		m.Processed,
 		m.Timestamp,
+		m.ExternalID,
 		m.ID,
 	)
 
@@ -110,7 +211,7 @@ func (s *MessageStore) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*Messag
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			id, conversation_id, sender_id, media_type, raw_text, transcript,
-			transcript_confidence, media_ref, processed, timestamp
+			transcript_confidence, media_ref, processed, timestamp, external_id
 		FROM messages
 		WHERE id = ANY($1)
 	`, ids)
@@ -125,7 +226,7 @@ func (s *MessageStore) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]*Messag
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
-			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
 		); err != nil {
 			return nil, err
 		}
@@ -170,7 +271,7 @@ func (s *MessageStore) GetByConversationSince(ctx context.Context, conversationI
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			id, conversation_id, sender_id, media_type, raw_text, transcript,
-			transcript_confidence, media_ref, processed, timestamp
+			transcript_confidence, media_ref, processed, timestamp, external_id
 		FROM messages
 		WHERE conversation_id = $1 AND timestamp >= $2
 		ORDER BY timestamp ASC
@@ -186,7 +287,7 @@ func (s *MessageStore) GetByConversationSince(ctx context.Context, conversationI
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
-			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
 		); err != nil {
 			return nil, err
 		}
@@ -245,7 +346,7 @@ func (s *MessageStore) ListWithoutEmbeddings(ctx context.Context) ([]*Message, e
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			m.id, m.conversation_id, m.sender_id, m.media_type, m.raw_text, m.transcript,
-			m.transcript_confidence, m.media_ref, m.processed, m.timestamp
+			m.transcript_confidence, m.media_ref, m.processed, m.timestamp, m.external_id
 		FROM messages m
 		WHERE NOT EXISTS (
 			SELECT 1 FROM embeddings e WHERE e.message_id = m.id
@@ -262,7 +363,7 @@ func (s *MessageStore) ListWithoutEmbeddings(ctx context.Context) ([]*Message, e
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
-			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
 		); err != nil {
 			return nil, err
 		}

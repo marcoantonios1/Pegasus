@@ -122,7 +122,35 @@ func (p *ExportParser) Parse(r io.Reader) ([]ingestion.RawMessage, error) {
 		out = append(out, raw)
 	}
 
+	disambiguateExternalIDs(out)
+
 	return out, nil
+}
+
+// disambiguateExternalIDs mirrors whatsapp.disambiguateExternalIDs
+// exactly (same reasoning: syntheticExternalID below hashes conversation
+// + sender + timestamp + content, and Instagram's own export always uses
+// this synthetic scheme — Meta's "Download Your Information" format
+// carries no native per-message ID at all — so two distinct messages
+// with identical content from the same sender at the same millisecond
+// can collide the same way two WhatsApp messages can). Not shared code
+// with the whatsapp package specifically to avoid a cross-adapter
+// dependency for four lines of logic — see that package's own doc
+// comment for the full reasoning this mirrors.
+func disambiguateExternalIDs(raws []ingestion.RawMessage) {
+	seen := make(map[string]int, len(raws))
+	for i := range raws {
+		id := raws[i].ExternalID
+		seen[id]++
+		if n := seen[id]; n > 1 {
+			raws[i].ExternalID = ordinalExternalID(id, n)
+		}
+	}
+}
+
+func ordinalExternalID(id string, ordinal int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s#%d", id, ordinal)))
+	return "ig-export:" + hex.EncodeToString(h[:])
 }
 
 func (p *ExportParser) buildMessage(m exportMessage, conversationID string) (ingestion.RawMessage, bool) {

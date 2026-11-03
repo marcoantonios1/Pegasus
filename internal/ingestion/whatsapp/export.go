@@ -206,7 +206,51 @@ func (p *ExportParser) Parse(r io.Reader, conversationID string) ([]ingestion.Ra
 		return nil, fmt.Errorf("scan export: %w", err)
 	}
 
+	disambiguateExternalIDs(out)
+
 	return out, nil
+}
+
+// disambiguateExternalIDs makes every RawMessage.ExternalID in raws
+// actually unique within the slice, in file order — the message-
+// ingestion idempotency fix's requirement: syntheticExternalID hashes
+// (conversation, sender, timestamp, body), and WhatsApp's export
+// timestamps are minute-granularity (no seconds) with no per-message
+// sequence number, so two genuinely DISTINCT real messages can
+// legitimately collide on every one of those inputs — e.g. two different
+// people each texting "ok" in the same displayed minute. Without this,
+// CreateIfAbsent's (conversation_id, external_id) uniqueness would treat
+// the second "ok" as a duplicate of the first and silently drop it.
+//
+// The FIRST occurrence of any given ID is left completely unchanged —
+// its ID is exactly what syntheticExternalID already computed, pinned by
+// a golden-value test, so re-parsing the same file always reproduces the
+// same IDs for already-unique messages (required for idempotent
+// re-import to work at all: the ID a message gets must not depend on
+// whether some LATER message in the file happens to collide with it).
+// The 2nd, 3rd, ... occurrence of the same ID each get a fresh,
+// deterministic ID derived from the original plus their ordinal
+// (ordinalExternalID) — deterministic across re-parses of the same file,
+// since it depends only on each message's own content and its position
+// among its own duplicates, never on wall-clock time or map iteration
+// order.
+func disambiguateExternalIDs(raws []ingestion.RawMessage) {
+	seen := make(map[string]int, len(raws))
+	for i := range raws {
+		id := raws[i].ExternalID
+		seen[id]++
+		if n := seen[id]; n > 1 {
+			raws[i].ExternalID = ordinalExternalID(id, n)
+		}
+	}
+}
+
+// ordinalExternalID derives a fresh, deterministic ID from id (an
+// already-computed synthetic external ID) plus ordinal (this message's
+// position among others sharing id) — see disambiguateExternalIDs.
+func ordinalExternalID(id string, ordinal int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s#%d", id, ordinal)))
+	return "wa-export:" + hex.EncodeToString(h[:])
 }
 
 // looksLikeForgedHeader reports whether a header-shaped line (already
