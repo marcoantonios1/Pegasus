@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -155,6 +157,18 @@ const (
 	TripleActionReinforced                TripleAction = "reinforced"
 	TripleActionCorrected                 TripleAction = "corrected"
 	TripleActionSkippedNoCorrectionTarget TripleAction = "skipped_no_correction_target"
+
+	// TripleActionSkippedAmbiguousCorrectionTarget is Issue 32's fix's own
+	// new outcome (selectCorrectionTarget's own doc comment has the full
+	// selection rules): several live candidate edges exist for the
+	// triple's (subject, predicate) and nothing — neither the triple
+	// already matching one of them, nor a stated ReplacesObject — narrows
+	// it down to exactly one. Distinct from
+	// TripleActionSkippedNoCorrectionTarget (zero valid candidates)
+	// specifically so "we found candidates but refused to guess among
+	// them" is discoverable and distinguishable from "there was nothing
+	// to correct at all," not silently folded into the same bucket.
+	TripleActionSkippedAmbiguousCorrectionTarget TripleAction = "skipped_ambiguous_correction_target"
 )
 
 // storeExtractedTriples resolves entities, applies source weighting,
@@ -167,17 +181,32 @@ const (
 // content: there is exactly one place this happens, not two parallel
 // implementations that happen to agree.
 //
-// A triple with IsCorrection=true is routed through
-// EdgeStore.CorrectMemory instead of a normal Create/Reinforce — see
-// extraction.ExtractedTriple.IsCorrection's own doc comment for why this
-// field exists at all (this issue's minimal extension to extraction's
-// output shape, not a second classifier). CorrectMemory needs an existing
-// edge to supersede; if FindMatchingEdge finds no current edge for this
-// (subject, predicate) to correct, the triple is skipped
-// (TripleActionSkippedNoCorrectionTarget) rather than either fabricating
-// a "corrected" edge with nothing to supersede or silently falling back
-// to a normal Create, which would misrepresent an explicit correction
-// signal as an ordinary new fact.
+// A triple with IsCorrection=true (and that passes the self-sender gate
+// below) is routed through EdgeStore.CorrectMemory instead of a normal
+// Create/Reinforce — see extraction.ExtractedTriple.IsCorrection's own
+// doc comment for why this field exists at all. Which live edge (if any)
+// actually gets superseded is selectCorrectionTarget's job (Issue 32's
+// fix) — its own doc comment has the full selection rules; the short
+// version: FindLiveEdgesBySubjectAndPredicate finds this subject+
+// predicate's currently-live candidates, and the triple's own
+// ReplacesObject (the stated old value) disambiguates among them when
+// there's more than one. No valid target, or an ambiguous one nothing
+// narrows down, is a skip (TripleActionSkippedNoCorrectionTarget /
+// TripleActionSkippedAmbiguousCorrectionTarget) rather than either
+// fabricating a "corrected" edge with nothing to supersede or silently
+// falling back to a normal Create, which would misrepresent an explicit
+// correction signal as an ordinary new fact.
+//
+// Issue 32, for context on why this needed its own fix separate from the
+// self-sender gate below: the ORIGINAL correction path called
+// FindMatchingEdge with the triple's own NEW object — which, by
+// construction, cannot already exist as a live edge (if it did, the
+// "correction" would just be restating an already-current fact) — so
+// every genuine correction silently fell through to
+// TripleActionSkippedNoCorrectionTarget and the wrong fact stayed live,
+// completely undetected (no pipeline-level test exercised this path).
+// The self-sender gate decides WHETHER a correction is honored at all;
+// this fix is what makes an honored correction actually apply.
 //
 // Self-sender gate (prompt-injection / forged-attribution fix, Part 3):
 // is_correction=true, on its own, is just the model's say-so — a
@@ -240,28 +269,68 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 		}
 
 		if honorCorrection {
-			existing, err := a.edges.FindMatchingEdge(ctx, subject.ID, triple.Predicate, objectID, objectLiteral)
+			candidates, err := a.edges.FindLiveEdgesBySubjectAndPredicate(ctx, subject.ID, triple.Predicate)
 			if err != nil {
-				return outcomes, fmt.Errorf("find edge to correct (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
-			}
-			if existing == nil {
-				// Nothing to supersede — see this function's doc comment
-				// for why this is a skip, not a fallback to Create.
-				outcomes = append(outcomes, TripleOutcome{Triple: triple, Action: TripleActionSkippedNoCorrectionTarget})
-				continue
+				return outcomes, fmt.Errorf("find live edges for correction (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 			}
 
-			corrected, err := a.edges.CorrectMemory(ctx, existing.ID, memory.CorrectionInput{
-				SubjectID:        subject.ID,
-				Predicate:        triple.Predicate,
-				ObjectID:         objectID,
-				ObjectLiteral:    objectLiteral,
-				SourceMessageIDs: sourceMessageIDs,
-			})
+			selection, err := a.selectCorrectionTarget(ctx, triple, objectID, objectLiteral, candidates)
 			if err != nil {
-				return outcomes, fmt.Errorf("correct edge %s: %w", existing.ID, err)
+				return outcomes, fmt.Errorf("select correction target (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 			}
-			outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: corrected, Action: TripleActionCorrected})
+
+			switch {
+			case selection.reinforceEdge != nil:
+				// A live edge already holds the triple's new value —
+				// nothing to correct; touch it the same way an ordinary
+				// matching extraction would (see this function's doc
+				// comment: "a live candidate already holds the NEW
+				// value" is requirement 4(b), not a correction at all).
+				if err := a.edges.Reinforce(ctx, selection.reinforceEdge.ID, now); err != nil {
+					return outcomes, fmt.Errorf("reinforce edge %s: %w", selection.reinforceEdge.ID, err)
+				}
+				outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: selection.reinforceEdge, Action: TripleActionReinforced})
+
+			case selection.supersedeEdge != nil:
+				corrected, err := a.edges.CorrectMemory(ctx, selection.supersedeEdge.ID, memory.CorrectionInput{
+					SubjectID:        subject.ID,
+					Predicate:        triple.Predicate,
+					ObjectID:         objectID,
+					ObjectLiteral:    objectLiteral,
+					SourceMessageIDs: sourceMessageIDs,
+				})
+				if err != nil {
+					if errors.Is(err, memory.ErrEdgeAlreadySuperseded) {
+						// A concurrent correction won the race
+						// (requirement 6) — log and skip this ONE
+						// triple; the window's other triples still
+						// store normally.
+						a.logf("storeExtractedTriples: correction target %s was already superseded by a concurrent correction (subject=%q predicate=%q) — skipping",
+							selection.supersedeEdge.ID, triple.Subject, triple.Predicate)
+						outcomes = append(outcomes, TripleOutcome{Triple: triple, Action: TripleActionSkippedNoCorrectionTarget})
+						continue
+					}
+					return outcomes, fmt.Errorf("correct edge %s: %w", selection.supersedeEdge.ID, err)
+				}
+				outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: corrected, Action: TripleActionCorrected})
+
+			default:
+				// A skip — either no live candidate existed at all, or
+				// several did and nothing narrowed it down to exactly
+				// one (selectCorrectionTarget's own doc comment has the
+				// exact rules). Logged distinctly per case rather than
+				// one generic line, so "ambiguous, refused to guess" and
+				// "genuinely nothing to correct" stay distinguishable in
+				// logs the same way they are in TripleAction.
+				if selection.skipAction == TripleActionSkippedAmbiguousCorrectionTarget {
+					a.logf("storeExtractedTriples: ambiguous correction target (subject=%q predicate=%q), %d live candidate edge(s) %v — skipping, not guessing",
+						triple.Subject, triple.Predicate, len(selection.skipCandidateIDs), selection.skipCandidateIDs)
+				} else {
+					a.logf("storeExtractedTriples: no live correction target found (subject=%q predicate=%q new_object=%q replaces_object=%v)",
+						triple.Subject, triple.Predicate, triple.Object, derefOrNil(triple.ReplacesObject))
+				}
+				outcomes = append(outcomes, TripleOutcome{Triple: triple, Action: selection.skipAction})
+			}
 			continue
 		}
 
@@ -362,6 +431,162 @@ func (a *API) isCorrectionFromSelf(ctx context.Context, idx *int, sourceMessageI
 	}
 
 	return true, ""
+}
+
+// correctionSelection is selectCorrectionTarget's decision for one
+// correction triple. Exactly one of reinforceEdge, supersedeEdge, or
+// skipAction is meaningful — storeExtractedTriples' own switch on this
+// struct is a single, exhaustive dispatch over those three, not several
+// independent booleans that could disagree with each other.
+type correctionSelection struct {
+	// reinforceEdge is set when a live candidate already holds the
+	// triple's NEW value (requirement 4(b)) — nothing to correct.
+	reinforceEdge *memory.Edge
+	// supersedeEdge is the live edge selectCorrectionTarget chose to
+	// supersede via CorrectMemory (requirements 4(c)/4(d)).
+	supersedeEdge *memory.Edge
+	// skipAction is set (to one of the two SkippedXxx TripleActions) when
+	// neither of the above applies — see selectCorrectionTarget's own
+	// doc comment for exactly which skip and why.
+	skipAction TripleAction
+	// skipCandidateIDs is populated only for an ambiguous skip — the
+	// live candidate edges that couldn't be narrowed to one, for
+	// storeExtractedTriples' own log line (requirement 4(e): "log the
+	// candidate edge IDs, so these are discoverable rather than
+	// silent").
+	skipCandidateIDs []uuid.UUID
+}
+
+// selectCorrectionTarget implements Issue 32's fix (requirement 4):
+// given candidates (the triple's subject+predicate's LIVE edges, from
+// FindLiveEdgesBySubjectAndPredicate — already confirmed non-empty by
+// the caller... actually checked here too, see (a) below) decide what a
+// correction triple should do. Matching is exact-after-normalization
+// (trimmed, case-insensitive), never fuzzy, by design: a fuzzy match
+// could supersede the WRONG live edge, and wrongly superseding a live
+// fact is worse than skipping a real correction — ambiguity is reported
+// (skipCandidateIDs, logged by the caller), never guessed through.
+//
+// Rules, applied in order:
+//
+//	(a) Zero live candidates → skip, TripleActionSkippedNoCorrectionTarget.
+//	(b) A live candidate already holds the triple's NEW object (exact
+//	    match, same rule FindMatchingEdge's own edgeObjectMatches uses) →
+//	    nothing to correct; reinforce it. Checked before (c)/(d) — if the
+//	    "correction" is actually just restating the current live value,
+//	    that's not a correction at all, regardless of how many OTHER
+//	    candidates might also exist.
+//	(c) triple.ReplacesObject is stated → match it (trimmed,
+//	    case-insensitive) against each candidate's object: object_literal
+//	    directly, or for an entity-object edge, against that object
+//	    entity's canonical_name (looked up ONCE via EntityStore.
+//	    GetByCanonicalName — read-only; resolveEntity is never used here,
+//	    since it creates entities as a side effect and must not run just
+//	    to check an old value that might not even correspond to a real
+//	    entity). Exactly one match → supersede it. Zero matches → skip,
+//	    TripleActionSkippedNoCorrectionTarget (the stated old value
+//	    doesn't correspond to anything live — still "nothing valid to
+//	    correct," not "ambiguous"). Several matches → skip,
+//	    TripleActionSkippedAmbiguousCorrectionTarget.
+//	(d) ReplacesObject absent (only reached if (b) didn't already resolve
+//	    it) → supersede the sole live candidate if there is EXACTLY one;
+//	    with several, skip, TripleActionSkippedAmbiguousCorrectionTarget
+//	    — with no stated old value, there's no way to tell which one.
+func (a *API) selectCorrectionTarget(ctx context.Context, triple extraction.ExtractedTriple, newObjectID *uuid.UUID, newObjectLiteral *string, candidates []*memory.Edge) (correctionSelection, error) {
+	if len(candidates) == 0 {
+		return correctionSelection{skipAction: TripleActionSkippedNoCorrectionTarget}, nil
+	}
+
+	for _, c := range candidates {
+		if edgeHasObject(c, newObjectID, newObjectLiteral) {
+			return correctionSelection{reinforceEdge: c}, nil
+		}
+	}
+
+	if old := strings.TrimSpace(derefOrEmpty(triple.ReplacesObject)); old != "" {
+		matches, err := a.candidatesMatchingOldValue(ctx, candidates, old)
+		if err != nil {
+			return correctionSelection{}, err
+		}
+		switch len(matches) {
+		case 0:
+			return correctionSelection{skipAction: TripleActionSkippedNoCorrectionTarget}, nil
+		case 1:
+			return correctionSelection{supersedeEdge: matches[0]}, nil
+		default:
+			return correctionSelection{skipAction: TripleActionSkippedAmbiguousCorrectionTarget, skipCandidateIDs: edgeIDs(matches)}, nil
+		}
+	}
+
+	if len(candidates) == 1 {
+		return correctionSelection{supersedeEdge: candidates[0]}, nil
+	}
+	return correctionSelection{skipAction: TripleActionSkippedAmbiguousCorrectionTarget, skipCandidateIDs: edgeIDs(candidates)}, nil
+}
+
+// candidatesMatchingOldValue returns the subset of candidates whose
+// object matches oldValue (already trimmed, non-empty) — trimmed,
+// case-insensitive exact match on object_literal; for an entity-object
+// edge, match against the object entity's canonical_name by resolving
+// oldValue itself to an entity ONCE (read-only — GetByCanonicalName, not
+// resolveEntity) and comparing IDs, rather than resolving every
+// candidate's own object entity individually.
+func (a *API) candidatesMatchingOldValue(ctx context.Context, candidates []*memory.Edge, oldValue string) ([]*memory.Edge, error) {
+	oldAsEntity, err := a.entities.GetByCanonicalName(ctx, oldValue)
+	if err != nil {
+		return nil, fmt.Errorf("look up old value %q as an entity: %w", oldValue, err)
+	}
+
+	var matches []*memory.Edge
+	for _, c := range candidates {
+		if c.ObjectLiteral != nil && strings.EqualFold(strings.TrimSpace(*c.ObjectLiteral), oldValue) {
+			matches = append(matches, c)
+			continue
+		}
+		if c.ObjectID != nil && oldAsEntity != nil && *c.ObjectID == oldAsEntity.ID {
+			matches = append(matches, c)
+		}
+	}
+	return matches, nil
+}
+
+// edgeHasObject mirrors memory.EdgeStore's own (unexported)
+// edgeObjectMatches — reimplemented here rather than exported across the
+// package boundary for one call site, over Edge's already-exported
+// ObjectID/ObjectLiteral fields.
+func edgeHasObject(e *memory.Edge, objectID *uuid.UUID, objectLiteral *string) bool {
+	if objectID != nil && e.ObjectID != nil {
+		return *objectID == *e.ObjectID
+	}
+	if objectLiteral != nil && e.ObjectLiteral != nil {
+		return *objectLiteral == *e.ObjectLiteral
+	}
+	return false
+}
+
+func edgeIDs(edges []*memory.Edge) []uuid.UUID {
+	ids := make([]uuid.UUID, len(edges))
+	for i, e := range edges {
+		ids[i] = e.ID
+	}
+	return ids
+}
+
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// derefOrNil formats a *string for a log line as either its value or the
+// literal "<nil>" — %v on a *string prints a pointer address, not the
+// pointed-to value or a readable nil, which is useless in a log line.
+func derefOrNil(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
 }
 
 // messageText returns the text content to embed for msg: raw_text if

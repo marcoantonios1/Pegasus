@@ -186,6 +186,61 @@ func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, now time.Ti
 	return err
 }
 
+// FindLiveEdgesBySubjectAndPredicate is GetBySubjectAndPredicate narrowed
+// to LIVE edges only (superseded_by IS NULL) — the correction-target
+// lookup internal/api's storeExtractedTriples needs (Issue 32's fix: that
+// function used to call FindMatchingEdge with the triple's own NEW
+// object, which by definition can't already exist as a live edge, so
+// every correction was silently skipped — see storeExtractedTriples' own
+// doc comment for the full history).
+//
+// Deliberately a SEPARATE method, not a change to FindMatchingEdge or
+// GetBySubjectAndPredicate: FindMatchingEdge's inclusion of superseded
+// edges is load-bearing for the normal create/reinforce path (a
+// re-extracted OLD value, after a correction has superseded it, reinforces
+// the superseded edge instead of spawning a second live edge for a fact
+// that's no longer current — see FindMatchingEdge's own doc comment and
+// its pinning test, TestFindMatchingEdge_IncludesSupersededEdges). A
+// correction can only ever sensibly supersede a currently-live fact — an
+// already-superseded edge isn't "what's currently believed" regardless of
+// which value it used to hold, so this query excludes it at the SQL
+// level (same (subject_id, predicate) index GetBySubjectAndPredicate
+// already uses) rather than filtering in Go after fetching rows this
+// caller never wants.
+func (s *EdgeStore) FindLiveEdgesBySubjectAndPredicate(ctx context.Context, subjectID uuid.UUID, predicate string) ([]*Edge, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			id, subject_id, predicate, object_id, object_literal, confidence,
+			importance, source_type, source_weight, source_message_ids,
+			first_seen, last_reinforced, decay_rate, decay_locked,
+			superseded_by, is_correction
+		FROM edges
+		WHERE subject_id = $1 AND predicate = $2 AND superseded_by IS NULL
+	`, subjectID, predicate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var e Edge
+
+		if err := rows.Scan(
+			&e.ID, &e.SubjectID, &e.Predicate, &e.ObjectID, &e.ObjectLiteral, &e.Confidence,
+			&e.Importance, &e.SourceType, &e.SourceWeight, &e.SourceMessageIDs,
+			&e.FirstSeen, &e.LastReinforced, &e.DecayRate, &e.DecayLocked,
+			&e.SupersededBy, &e.IsCorrection,
+		); err != nil {
+			return nil, err
+		}
+
+		edges = append(edges, &e)
+	}
+
+	return edges, rows.Err()
+}
+
 // FindMatchingEdge looks for an existing edge with the same subject_id,
 // predicate, and object (object_id or object_literal — exact match only;
 // near-duplicate fuzzy merging of similar-but-not-identical objects is the
@@ -193,6 +248,17 @@ func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, now time.Ti
 // (nil, nil) if no match exists. Used to decide whether a newly extracted
 // triple should reinforce an existing edge (Reinforce) or become a new one
 // (Create) — that decision itself is the caller's, not this method's.
+//
+// Deliberately includes SUPERSEDED edges (via GetBySubjectAndPredicate,
+// which applies no superseded_by filter) — this is LOAD-BEARING, not an
+// oversight: it's what makes a re-extracted OLD value (one a correction
+// has already superseded) reinforce the superseded edge instead of
+// spawning a second, live edge that would contradict the correction.
+// TestFindMatchingEdge_IncludesSupersededEdges pins this exact behavior.
+// Do not change this method to exclude superseded edges — a correction's
+// own target-selection lookup (which genuinely does need live-only edges)
+// is FindLiveEdgesBySubjectAndPredicate, added as a separate method
+// specifically so it wouldn't need to change this one's contract.
 func (s *EdgeStore) FindMatchingEdge(ctx context.Context, subjectID uuid.UUID, predicate string, objectID *uuid.UUID, objectLiteral *string) (*Edge, error) {
 	candidates, err := s.GetBySubjectAndPredicate(ctx, subjectID, predicate)
 	if err != nil {
