@@ -254,7 +254,13 @@ func TestImportWhatsApp_DefaultPolicyDowngradesSelfCorrectionToNormalClaim(t *te
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "SelfCorrectionImport.txt")
+	// Uuid-suffixed, not a fixed name: conversation_id derives from the
+	// filename, and this suite runs against a real, persistent, shared
+	// dev database — a fixed name would let message-ingestion
+	// idempotency (CreateIfAbsent) recognize this run's messages as
+	// already-processed leftovers from an earlier run of this same
+	// test, silently skipping windowing/extraction entirely.
+	exportPath := filepath.Join(dir, "SelfCorrectionImport-"+uuid.New().String()+".txt")
 	var export string
 	for i := 0; i < extraction.DefaultHistoricalWindowSize; i++ {
 		export += fmt.Sprintf("1/1/26, 9:0%d AM - Marco: message %d\n", i, i)
@@ -315,7 +321,7 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "HonorTrueImport.txt")
+	exportPath := filepath.Join(dir, "HonorTrueImport-"+uuid.New().String()+".txt")
 	var export string
 	for i := 0; i < extraction.DefaultHistoricalWindowSize; i++ {
 		export += fmt.Sprintf("1/1/26, 9:0%d AM - Marco: message %d\n", i, i)
