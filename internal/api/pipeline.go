@@ -195,7 +195,30 @@ const (
 // writes — the actual mechanism (not just a comment's claim) by which
 // both are guaranteed to produce the same shape of output for equivalent
 // content: there is exactly one place this happens, not two parallel
-// implementations that happen to agree.
+// implementations that happen to agree. Deliberately NOT special-cased
+// per caller for timestamps either (edge-timestamp fix, requirement 4):
+// Whatsmeow's history-sync can hand ProcessLiveMessage an old message
+// through the exact same "live" path ImportWhatsApp uses for historical
+// backlog, so both need identical observed-time handling, not "import
+// gets real dates, live gets now."
+//
+// Edge timestamps reflect when facts were actually SAID, not when this
+// function happens to run (the edge-timestamp fix this comment
+// documents): a new edge's FirstSeen/LastReinforced, and a reinforced
+// edge's (earliest, at) pair, are derived from the relevant source
+// messages' own messages.timestamp via resolveMessageTimestampRange /
+// correctionObservedAt — never from the `now` parameter directly. `now`
+// itself is kept, but ONLY as: (1) the clamp reference point
+// clampFutureTimestamp compares every resolved message timestamp against
+// (a misparsed future-dated .txt export timestamp clamps to now, logged,
+// rather than feeding a bogus future date into decay math), and (2) a
+// last-resort fallback on the rare path where sourceMessageIDs resolves
+// to zero actual messages (logged either way it's used) — both of which
+// genuinely mean "processing time," unlike the "when was this said" job
+// an edge's own timestamps do. Every other former direct use of `now`
+// (both Reinforce call sites, and new-edge creation) has been replaced
+// with a message-derived value; see this function's body for exactly
+// where.
 //
 // A triple with IsCorrection=true (and that passes the self-sender gate
 // below) is routed through EdgeStore.CorrectMemory instead of a normal
@@ -308,6 +331,20 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 				return outcomes, fmt.Errorf("select correction target (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 			}
 
+			// honorCorrection guarantees triple.CorrectionSourceIndex is
+			// non-nil here: isCorrectionFromSelf returns false for a nil
+			// idx, which would have set honorCorrection=false and never
+			// reached this block at all (see its own doc comment).
+			// Correction edges record a single observed moment — the
+			// correction message's own timestamp — not a window-level
+			// earliest/latest, since a correction names ONE specific
+			// message (requirement 3's own distinction from the normal
+			// Create/Reinforce paths below).
+			correctionAt, err := a.correctionObservedAt(ctx, *triple.CorrectionSourceIndex, sourceMessageIDs, now)
+			if err != nil {
+				return outcomes, fmt.Errorf("resolve correction observed time (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+			}
+
 			switch {
 			case selection.reinforceEdge != nil:
 				// A live edge already holds the triple's new value —
@@ -315,7 +352,7 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 				// matching extraction would (see this function's doc
 				// comment: "a live candidate already holds the NEW
 				// value" is requirement 4(b), not a correction at all).
-				if err := a.edges.Reinforce(ctx, selection.reinforceEdge.ID, now); err != nil {
+				if err := a.edges.Reinforce(ctx, selection.reinforceEdge.ID, correctionAt, correctionAt); err != nil {
 					return outcomes, fmt.Errorf("reinforce edge %s: %w", selection.reinforceEdge.ID, err)
 				}
 				outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: selection.reinforceEdge, Action: TripleActionReinforced})
@@ -327,6 +364,7 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 					ObjectID:         objectID,
 					ObjectLiteral:    objectLiteral,
 					SourceMessageIDs: sourceMessageIDs,
+					ObservedAt:       &correctionAt,
 				})
 				if err != nil {
 					if errors.Is(err, memory.ErrEdgeAlreadySuperseded) {
@@ -370,8 +408,27 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 		if err != nil {
 			return outcomes, fmt.Errorf("find matching edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
 		}
+
+		// Window-level observed-time range (requirement 3): drives both
+		// the Reinforce call just below and the new-edge FirstSeen/
+		// LastReinforced further down, in place of the `now` processing
+		// time either used to use unconditionally.
+		windowEarliest, windowLatest, windowOK, err := a.resolveMessageTimestampRange(ctx, sourceMessageIDs, now)
+		if err != nil {
+			return outcomes, fmt.Errorf("resolve message timestamps (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+		}
+		if !windowOK {
+			// sourceMessageIDs are messages this very call just processed,
+			// so this shouldn't happen in practice — fails safe to
+			// processing time (logged) rather than silently leaving the
+			// edge's timestamps at insertEdge's own now() default with no
+			// trace of why.
+			a.logf("storeExtractedTriples: no resolvable source message timestamps (subject=%q predicate=%q) — falling back to processing time", triple.Subject, triple.Predicate)
+			windowEarliest, windowLatest = now, now
+		}
+
 		if existing != nil {
-			if err := a.edges.Reinforce(ctx, existing.ID, now); err != nil {
+			if err := a.edges.Reinforce(ctx, existing.ID, windowLatest, windowEarliest); err != nil {
 				return outcomes, fmt.Errorf("reinforce edge %s: %w", existing.ID, err)
 			}
 			outcomes = append(outcomes, TripleOutcome{Triple: triple, Edge: existing, Action: TripleActionReinforced})
@@ -413,6 +470,13 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			SourceWeight:     memory.SourceWeights[sourceType],
 			SourceMessageIDs: sourceMessageIDs,
 			DecayRate:        memory.DefaultDecayRate(triple.Predicate),
+			// FirstSeen/LastReinforced: when this was actually SAID
+			// (windowEarliest/windowLatest, derived above from the
+			// source messages' own timestamps), not whenever this
+			// function happens to run — the edge-timestamp fix's whole
+			// point. A 2019 fact gets first_seen=2019, not today.
+			FirstSeen:      windowEarliest,
+			LastReinforced: windowLatest,
 		}
 		if err := a.edges.Create(ctx, edge); err != nil {
 			return outcomes, fmt.Errorf("create edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
@@ -481,33 +545,101 @@ func (a *API) isCorrectionFromSelf(ctx context.Context, idx *int, sourceMessageI
 	return true, ""
 }
 
-// resolveLatestMessageTimestamp returns the latest Timestamp among the
-// messages in ids that still exist, and whether any did (false for an
-// empty/nil ids, or if none of them resolve). Shared by
-// isStaleResurrection for both sides of its comparison: the incoming
-// triple's own "when was this actually said" timestamp (from the
-// window's sourceMessageIDs) and a superseding edge's timestamp (from
-// its own SourceMessageIDs).
-func (a *API) resolveLatestMessageTimestamp(ctx context.Context, ids []uuid.UUID) (time.Time, bool, error) {
+// clampFutureTimestamp returns ts, or now (logged) if ts is after now —
+// the edge-timestamp fix's requirement 6: a WhatsApp .txt export's
+// timestamp parsing has no timezone and guesses a day-ordering locale
+// (internal/ingestion/whatsapp/export.go's own package-level assumptions
+// comment), so a misparse could otherwise produce a future date. A
+// future-dated message feeding into an edge's FirstSeen/LastReinforced
+// would make a fact look observed before processing ever got to it,
+// which is just as wrong for the decay model as an incorrectly-ancient
+// date would be — so every message timestamp this file derives an edge
+// timestamp from passes through here first. label is a short, log-only
+// description of which message/call site this clamp fired for.
+func (a *API) clampFutureTimestamp(ts, now time.Time, label string) time.Time {
+	if ts.After(now) {
+		a.logf("clampFutureTimestamp: %s has a future timestamp %s (now=%s) — clamping to now", label, ts, now)
+		return now
+	}
+	return ts
+}
+
+// resolveMessageTimestampRange returns the earliest and latest Timestamp
+// (each passed through clampFutureTimestamp first) among the messages in
+// ids that still exist, and whether any did (false for an empty/nil ids,
+// or if none of them resolve).
+//
+// This is how storeExtractedTriples turns "which messages is this triple
+// about" into "when did this actually happen" — the edge-timestamp fix's
+// core mechanism (requirement 3): a new edge's FirstSeen/LastReinforced,
+// and a window-level Reinforce call's (earliest, at) pair, are both
+// derived from this rather than from the `now` processing-time parameter.
+// This is deliberately WINDOW-level precision, not per-triple or
+// per-message: every triple storeExtractedTriples processes in one call
+// shares the same sourceMessageIDs, and therefore the same computed
+// range, even though a window can span several minutes/messages (5-10
+// per extraction.DefaultHistoricalWindowSize/MaxLiveWindowMessages).
+// Narrowing this to per-triple precision would need extraction to report
+// which message within the window produced each triple — out of this
+// issue's scope (same documented limit as isStaleResurrection's own
+// window-level comparison).
+func (a *API) resolveMessageTimestampRange(ctx context.Context, ids []uuid.UUID, now time.Time) (earliest, latest time.Time, ok bool, err error) {
 	if len(ids) == 0 {
-		return time.Time{}, false, nil
+		return time.Time{}, time.Time{}, false, nil
 	}
 
 	msgs, err := a.messages.GetByIDs(ctx, ids)
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, time.Time{}, false, err
 	}
 	if len(msgs) == 0 {
-		return time.Time{}, false, nil
+		return time.Time{}, time.Time{}, false, nil
 	}
 
-	latest := msgs[0].Timestamp
+	first := a.clampFutureTimestamp(msgs[0].Timestamp, now, fmt.Sprintf("message %s", msgs[0].ID))
+	earliest, latest = first, first
 	for _, m := range msgs[1:] {
-		if m.Timestamp.After(latest) {
-			latest = m.Timestamp
+		ts := a.clampFutureTimestamp(m.Timestamp, now, fmt.Sprintf("message %s", m.ID))
+		if ts.Before(earliest) {
+			earliest = ts
+		}
+		if ts.After(latest) {
+			latest = ts
 		}
 	}
-	return latest, true, nil
+	return earliest, latest, true, nil
+}
+
+// resolveLatestMessageTimestamp is resolveMessageTimestampRange narrowed
+// to just the latest value — isStaleResurrection only ever needs one side
+// of the range (both for the incoming triple's own timestamp and for a
+// superseding edge's timestamp).
+func (a *API) resolveLatestMessageTimestamp(ctx context.Context, ids []uuid.UUID, now time.Time) (time.Time, bool, error) {
+	_, latest, ok, err := a.resolveMessageTimestampRange(ctx, ids, now)
+	return latest, ok, err
+}
+
+// correctionObservedAt resolves a correction triple's CorrectionSourceIndex
+// to that ONE message's own Timestamp — the actual moment the correction
+// was said. A correction names a single specific message, not a window
+// (unlike the normal Create/Reinforce paths' window-level earliest/latest
+// — see resolveMessageTimestampRange's own doc comment), so this is
+// deliberately NOT resolveMessageTimestampRange over the whole window.
+//
+// Callers only ever reach this from inside storeExtractedTriples' `if
+// honorCorrection` branch, where triple.CorrectionSourceIndex is
+// guaranteed non-nil and in range — isCorrectionFromSelf already
+// validated idx before honorCorrection could ever be true (a nil or
+// out-of-range idx downgrades the triple to a normal claim instead, which
+// never reaches this function) — so idx is taken as a plain int here, not
+// re-validated a second time.
+func (a *API) correctionObservedAt(ctx context.Context, idx int, sourceMessageIDs []uuid.UUID, now time.Time) (time.Time, error) {
+	msgID := sourceMessageIDs[idx]
+	msg, err := a.messages.GetByID(ctx, msgID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load correction source message %s: %w", msgID, err)
+	}
+	return a.clampFutureTimestamp(msg.Timestamp, now, fmt.Sprintf("correction source message %s", msg.ID)), nil
 }
 
 // isStaleResurrection is the stale-resurrection guard: called only when
@@ -591,7 +723,7 @@ func (a *API) isStaleResurrection(ctx context.Context, subjectID uuid.UUID, pred
 		return false, nil
 	}
 
-	incoming, ok, err := a.resolveLatestMessageTimestamp(ctx, sourceMessageIDs)
+	incoming, ok, err := a.resolveLatestMessageTimestamp(ctx, sourceMessageIDs, now)
 	if err != nil {
 		return false, fmt.Errorf("resolve incoming message timestamp: %w", err)
 	}
@@ -610,12 +742,12 @@ func (a *API) isStaleResurrection(ctx context.Context, subjectID uuid.UUID, pred
 			return false, fmt.Errorf("load superseding edge %s (superseded match %s): %w", *match.SupersededBy, match.ID, err)
 		}
 
-		sTimestamp, ok, err := a.resolveLatestMessageTimestamp(ctx, superseding.SourceMessageIDs)
+		sTimestamp, ok, err := a.resolveLatestMessageTimestamp(ctx, superseding.SourceMessageIDs, now)
 		if err != nil {
 			return false, fmt.Errorf("resolve superseding edge %s's message timestamp: %w", superseding.ID, err)
 		}
 		if !ok {
-			sTimestamp = superseding.FirstSeen
+			sTimestamp = a.clampFutureTimestamp(superseding.FirstSeen, now, fmt.Sprintf("superseding edge %s's first_seen", superseding.ID))
 			a.logf("isStaleResurrection: superseding edge %s has no resolvable source messages, falling back to first_seen (%s)",
 				superseding.ID, superseding.FirstSeen)
 		}

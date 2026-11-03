@@ -51,6 +51,50 @@ func TestEffectiveConfidence_FutureLastReinforcedClampedToZeroDecay(t *testing.T
 	}
 }
 
+// TestEffectiveConfidence_RealDecayRatesAfterElapsedTime is the
+// edge-timestamp fix's requirement 12/9 check, using the REAL production
+// decay-rate constants (not arbitrary 0.01/0.5 values like the other
+// tests in this file) — confirming EffectiveConfidence, unchanged by this
+// fix, keeps doing the right thing once fed a genuinely old
+// LastReinforced.
+//
+// Two separate elapsed-time scales are used deliberately, not one shared
+// span: DecayRateStable's own doc comment (decay_rates.go) gives ~3.6%
+// decay as its illustrative "barely moves" figure specifically at the
+// ONE-YEAR mark — its ~19-year implied half-life means that "barely"
+// claim stops holding at a multi-year span (over the full 2019->2026 gap
+// used for the decaying-predicate check below, DecayRateStable itself
+// drops to ~0.68, a real difference, just much smaller than a half-life-
+// scale decay). So: the DECAYING check uses the full 2019->2026 gap
+// (strictly below, emphatically so), and the STABLE check uses a
+// one-year gap (barely moves), matching each constant's own documented
+// claim rather than asserting something neither constant was designed to
+// promise at an arbitrary shared timescale.
+func TestEffectiveConfidence_RealDecayRatesAfterElapsedTime(t *testing.T) {
+	lastReinforced := time.Date(2019, 3, 14, 9, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	daysElapsed := now.Sub(lastReinforced).Hours() / 24
+
+	decaying := Edge{Confidence: 0.9, DecayRate: DecayRateSlow, LastReinforced: lastReinforced}
+	gotDecaying := EffectiveConfidence(decaying, now)
+	wantDecaying := 0.9 * math.Exp(-DecayRateSlow*daysElapsed)
+
+	if math.Abs(gotDecaying-wantDecaying) > floatTolerance {
+		t.Errorf("EffectiveConfidence(decaying) = %v, want hand-computed %v", gotDecaying, wantDecaying)
+	}
+	if !(gotDecaying < decaying.Confidence) {
+		t.Errorf("expected a decaying predicate's effective confidence (%v) to be strictly below stored confidence (%v) after %v days",
+			gotDecaying, decaying.Confidence, daysElapsed)
+	}
+
+	oneYearLater := lastReinforced.AddDate(1, 0, 0)
+	stable := Edge{Confidence: 0.9, DecayRate: DecayRateStable, LastReinforced: lastReinforced}
+	gotStable := EffectiveConfidence(stable, oneYearLater)
+	if diff := stable.Confidence - gotStable; diff < 0 || diff > 0.05 {
+		t.Errorf("expected a stable-rate predicate to barely move over 1 year, got %v (diff from stored confidence %v)", gotStable, diff)
+	}
+}
+
 func TestEffectiveConfidence_DecayLockedNeverChanges(t *testing.T) {
 	lastReinforced := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	e := Edge{

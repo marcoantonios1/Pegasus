@@ -29,6 +29,17 @@ type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// insertEdge writes e. FirstSeen/LastReinforced, if e sets them (non-zero
+// time.Time), are used AS GIVEN — the actual fix for edges defaulting to
+// "now" regardless of when the underlying fact was actually said: callers
+// that know a real observed time (storeExtractedTriples, deriving it from
+// the source messages' own timestamps; CorrectMemory, via
+// CorrectionInput.ObservedAt) now pass it through here instead of relying
+// on the column's own DB-side default. A zero e.FirstSeen/e.LastReinforced
+// (every caller before this fix, and any caller with no real observed
+// time to supply) binds NULL and falls back to COALESCE(..., now()) —
+// unchanged from the previous behavior, so this is purely additive for
+// every existing call site.
 func insertEdge(ctx context.Context, q queryer, e *Edge) error {
 	// source_message_ids is NOT NULL DEFAULT '{}'; a nil Go slice encodes as
 	// SQL NULL rather than an empty array, so normalize it.
@@ -36,13 +47,23 @@ func insertEdge(ctx context.Context, q queryer, e *Edge) error {
 		e.SourceMessageIDs = []uuid.UUID{}
 	}
 
+	var firstSeen, lastReinforced *time.Time
+	if !e.FirstSeen.IsZero() {
+		firstSeen = &e.FirstSeen
+	}
+	if !e.LastReinforced.IsZero() {
+		lastReinforced = &e.LastReinforced
+	}
+
 	return q.QueryRow(ctx, `
 		INSERT INTO edges (
 			subject_id, predicate, object_id, object_literal, confidence,
 			importance, source_type, source_weight, source_message_ids,
-			decay_rate, decay_locked, superseded_by, is_correction
+			decay_rate, decay_locked, superseded_by, is_correction,
+			first_seen, last_reinforced
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+			COALESCE($14, now()), COALESCE($15, now())
 		)
 		RETURNING id, first_seen, last_reinforced
 	`,
@@ -59,6 +80,8 @@ func insertEdge(ctx context.Context, q queryer, e *Edge) error {
 		e.DecayLocked,
 		e.SupersededBy,
 		e.IsCorrection,
+		firstSeen,
+		lastReinforced,
 	).Scan(&e.ID, &e.FirstSeen, &e.LastReinforced)
 }
 
@@ -161,16 +184,36 @@ func (s *EdgeStore) GetBySubjectAndPredicate(ctx context.Context, subjectID uuid
 	return edges, rows.Err()
 }
 
-// Reinforce updates only last_reinforced — nothing else. Kept separate
-// from Update() specifically so reinforcing an edge can never accidentally
-// rewrite confidence, predicate, or any other field via a stray
-// full-object update; this method's whole contract is "touch the
-// timestamp, nothing more."
+// Reinforce updates last_reinforced and first_seen — nothing else. Kept
+// separate from Update() specifically so reinforcing an edge can never
+// accidentally rewrite confidence, predicate, or any other field via a
+// stray full-object update; this method's whole contract is "touch the
+// two observation-timestamp columns, nothing more."
 //
-// now is taken as an explicit parameter (matching Update's existing
-// pattern of binding e.LastReinforced directly rather than relying on SQL
-// now()) rather than letting Postgres own the value — this keeps the
-// method deterministically testable without wall-clock sleeps.
+// at and earliest are both taken as explicit parameters (matching
+// Update's existing pattern of binding timestamps directly rather than
+// relying on SQL now()) rather than letting Postgres own the value — this
+// keeps the method deterministically testable without wall-clock sleeps.
+//
+// Order-independence (the edge-timestamp fix's Part 3): a reinforcing
+// message is not guaranteed to arrive, or be processed, in real-world
+// order — a re-import, a reprocessed window, or a voice note whose
+// transcription succeeds on a retry can all reinforce an edge with a
+// message OLDER or NEWER than whatever the edge currently has. This
+// method therefore never simply overwrites either column:
+//
+//	last_reinforced = GREATEST(last_reinforced, at)
+//	first_seen       = LEAST(first_seen, earliest)
+//
+// last_reinforced only ever moves FORWARD (or stays put), first_seen only
+// ever moves EARLIER (or stays put) — reinforcement can retroactively
+// pull first_seen back if an out-of-order message turns out to predate
+// what was previously recorded as the earliest sighting, but can never
+// push either column the wrong direction. For the common case (a single
+// reinforcing message, not a multi-message window), callers pass the
+// same timestamp for both at and earliest — see storeExtractedTriples'
+// own call sites (internal/api/pipeline.go) for window-level vs.
+// single-message usage.
 //
 // decay_locked edges ARE reinforced by this method: last_reinforced still
 // updates, since a correction being independently reconfirmed later is
@@ -178,11 +221,13 @@ func (s *EdgeStore) GetBySubjectAndPredicate(ctx context.Context, subjectID uuid
 // protects is confidence, which this method never touches regardless of
 // the flag — see EffectiveConfidence, which short-circuits on
 // DecayLocked before ever consulting LastReinforced. Reinforcing a locked
-// edge's timestamp doesn't weaken that protection.
-func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, now time.Time) error {
+// edge's timestamps doesn't weaken that protection.
+func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, at, earliest time.Time) error {
 	_, err := s.db.Exec(ctx, `
-		UPDATE edges SET last_reinforced = $1 WHERE id = $2
-	`, now, edgeID)
+		UPDATE edges
+		SET last_reinforced = GREATEST(last_reinforced, $1), first_seen = LEAST(first_seen, $2)
+		WHERE id = $3
+	`, at, earliest, edgeID)
 	return err
 }
 

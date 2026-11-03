@@ -363,7 +363,12 @@ func mergeCluster(ctx context.Context, store *memory.EdgeStore, cluster []*memor
 		return 0, fmt.Errorf("dedup: update survivor edge %s with merged source_message_ids: %w", survivor.ID, err)
 	}
 
-	if err := store.Reinforce(ctx, survivor.ID, latestConfirmation); err != nil {
+	// earliest = survivor.FirstSeen: clusterDuplicates already sorted the
+	// cluster ascending by FirstSeen, so the survivor (cluster[0]) already
+	// holds the earliest FirstSeen in the whole cluster — this LEAST is a
+	// deliberate no-op, not a second independent timestamp, matching
+	// Reinforce's new two-argument contract (edge-timestamp fix, Part 3).
+	if err := store.Reinforce(ctx, survivor.ID, latestConfirmation, survivor.FirstSeen); err != nil {
 		return 0, fmt.Errorf("dedup: reinforce survivor edge %s: %w", survivor.ID, err)
 	}
 	survivor.LastReinforced = latestConfirmation
