@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -43,6 +44,18 @@ type CorrectionInput struct {
 	ObjectID         *uuid.UUID // exactly one of ObjectID/ObjectLiteral, same XOR rule as any edge
 	ObjectLiteral    *string
 	SourceMessageIDs []uuid.UUID // the message(s) where Marco issued the correction
+
+	// ObservedAt is when the correction was actually SAID — the source
+	// message's own timestamp, not whenever CorrectMemory happens to run —
+	// used for the new (correcting) edge's FirstSeen and LastReinforced
+	// (edge-timestamp fix, Part 1). Deliberately a plain fact about when
+	// the message was sent, not an authority field: it does not change
+	// WHAT the correction is trusted to do (Confidence/DecayLocked/
+	// IsCorrection/SourceType stay exactly as hardcoded below regardless
+	// of ObservedAt), only WHEN it's recorded as having happened. nil
+	// keeps insertEdge's now() default — every caller before this fix,
+	// and any caller with no real observed time to supply.
+	ObservedAt *time.Time
 
 	// Importance, if nil, is inherited from the edge being corrected — the
 	// correction changes how CERTAIN the fact is, not how much it matters,
@@ -125,6 +138,14 @@ func (s *EdgeStore) CorrectMemory(ctx context.Context, oldEdgeID uuid.UUID, corr
 		DecayRate:        DefaultDecayRate(correction.Predicate),
 		DecayLocked:      true,
 		IsCorrection:     true,
+	}
+	if correction.ObservedAt != nil {
+		// Both FirstSeen and LastReinforced: a correction is a single
+		// observed event (Marco said it once, at one moment), not a
+		// window with separate earliest/latest points — see
+		// CorrectionInput.ObservedAt's own doc comment.
+		newEdge.FirstSeen = *correction.ObservedAt
+		newEdge.LastReinforced = *correction.ObservedAt
 	}
 
 	if err := insertEdge(ctx, tx, newEdge); err != nil {

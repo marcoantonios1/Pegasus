@@ -89,7 +89,7 @@ func TestEdgeStore_Reinforce(t *testing.T) {
 
 	injectedNow := edge.LastReinforced.Add(72 * time.Hour) // simulate 3 days passing
 
-	if err := edgeStore.Reinforce(ctx, edge.ID, injectedNow); err != nil {
+	if err := edgeStore.Reinforce(ctx, edge.ID, injectedNow, edge.FirstSeen); err != nil {
 		t.Fatalf("Reinforce: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestEdgeStore_Reinforce_DecayLockedEdgeTimestampStillUpdates(t *testing.T) 
 	}
 
 	injectedNow := edge.LastReinforced.Add(24 * time.Hour)
-	if err := edgeStore.Reinforce(ctx, edge.ID, injectedNow); err != nil {
+	if err := edgeStore.Reinforce(ctx, edge.ID, injectedNow, edge.FirstSeen); err != nil {
 		t.Fatalf("Reinforce: %v", err)
 	}
 
