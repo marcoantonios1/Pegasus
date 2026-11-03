@@ -33,7 +33,19 @@ const searchMemoryLimit = MaxTopN
 // specific facts (closer in spirit to GetByID/GetBySubjectAndPredicate
 // than to GetRelevantContext's curated default-retrieval ranking), so
 // pruning a match the caller asked for by name would be surprising rather
-// than helpful.
+// than helpful. That stays true: do NOT add IsPruneCandidate here — a
+// faded, low-confidence, or low-importance edge that was never deleted
+// must still come back for an explicit keyword lookup.
+//
+// Deletion is a DIFFERENT, separate rule from pruning, and is NOT
+// optional the way pruning is: a tombstone (memory.IsTombstone —
+// source_type = SourceTypeUserDeletion) is excluded unconditionally, via
+// the same memory.searchFiltersWhere SQL fragment GetRelevantContext's
+// SearchRelevant uses, regardless of confidence/importance/pruning
+// configuration. "The user asked to delete this" and "this fact decayed
+// below some confidence floor" are not the same kind of exclusion —
+// pruning is a curation judgment this method deliberately opts out of;
+// never surfacing something the user explicitly deleted is not.
 func (a *API) SearchMemory(ctx context.Context, query string, filters Filters) ([]*memory.Edge, error) {
 	edges, err := a.edges.SearchByText(ctx, query, filters.searchFilters(), searchMemoryLimit)
 	if err != nil {

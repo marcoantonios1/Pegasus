@@ -115,13 +115,14 @@ func (a *API) GetRelationship(ctx context.Context, contactID uuid.UUID) (*memory
 // where they're the subject), ordered by first_seen ascending.
 //
 // This is the one method in this whole API that does NOT exclude
-// superseded edges — deliberately, and unlike every other read method
-// here (GetRelevantContext, SearchMemory both filter superseded_by IS
-// NULL by default; see EdgeStore.SearchRelevant's doc comment). The point
-// of a relationship HISTORY is reconstructing how things changed over
-// time — a corrected or contradicted fact is part of that story, not
-// noise to hide. See EdgeStore.GetBySubjectOrObject's own doc comment,
-// the query this method is a thin wrapper over.
+// superseded edges, or tombstones (memory.IsTombstone) — deliberately,
+// and unlike every other read method here (GetRelevantContext,
+// SearchMemory both exclude both via memory.searchFiltersWhere; see
+// EdgeStore.SearchRelevant's doc comment). The point of a relationship
+// HISTORY is reconstructing how things changed over time — a corrected
+// or contradicted fact, or a fact the user deleted outright, is part of
+// that story, not noise to hide. See EdgeStore.GetBySubjectOrObject's
+// own doc comment, the query this method is a thin wrapper over.
 func (a *API) GetRelationshipHistory(ctx context.Context, contactID uuid.UUID) ([]*memory.Edge, error) {
 	edges, err := a.edges.GetBySubjectOrObject(ctx, contactID)
 	if err != nil {

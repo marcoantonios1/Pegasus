@@ -312,3 +312,58 @@ func TestLiteralSimilarity(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeDuplicates_ExcludesTombstone covers the delete-exclusion
+// audit's dedup finding (requirement 9): MergeDuplicates' own `live`
+// filter only checks SupersededBy == nil, with no tombstone check — a
+// soft-deleted edge's LIVE tombstone, sharing the same subject/predicate
+// and (by construction) the exact same object the deleted edge had,
+// could otherwise cluster with a genuinely live, merely-similar edge and
+// — since the survivor is picked by EARLIEST FirstSeen, and a tombstone
+// is typically older than whatever reasserts the fact later — become the
+// merge SURVIVOR: a confidence-0/importance-0 tombstone absorbing a real
+// live edge's source_message_ids, corrupting it.
+func TestMergeDuplicates_ExcludesTombstone(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "Dedup Tombstone Subject")
+	base := time.Now().Add(-72 * time.Hour)
+	lit := func(s string) *string { return &s }
+
+	// Same known-good similar-literal pair as TestMergeDuplicates' own
+	// Case 2 ("went to the gym" / "went to the gym today",
+	// Dice coefficient 8/9 ≈ 0.889, above the 0.85 default threshold).
+	tombstone := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "event_present", ObjectLiteral: lit("went to the gym"),
+		Confidence: 0, Importance: 0, SourceType: memory.SourceTypeUserDeletion, SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow,
+	}, base)
+	live := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "event_present", ObjectLiteral: lit("went to the gym today"),
+		Confidence: 0.7, Importance: 0.4, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow,
+	}, base.Add(1*time.Hour))
+
+	mergedCount, err := MergeDuplicates(ctx, edgeStore, []*memory.Edge{tombstone, live}, DefaultDedupConfig())
+	if err != nil {
+		t.Fatalf("MergeDuplicates: %v", err)
+	}
+	if mergedCount != 0 {
+		t.Errorf("expected zero merges (the tombstone must never be clustered at all), got %d", mergedCount)
+	}
+
+	reloadedLive := reloadEdge(t, ctx, edgeStore, live.ID)
+	if reloadedLive.SupersededBy != nil {
+		t.Errorf("expected the live edge to remain live (not superseded by the tombstone), got superseded_by=%v", reloadedLive.SupersededBy)
+	}
+	reloadedTombstone := reloadEdge(t, ctx, edgeStore, tombstone.ID)
+	if reloadedTombstone.SupersededBy != nil {
+		t.Errorf("expected the tombstone to remain untouched, got superseded_by=%v", reloadedTombstone.SupersededBy)
+	}
+	if len(reloadedTombstone.SourceMessageIDs) != 0 {
+		t.Errorf("expected the tombstone to never absorb the live edge's source_message_ids, got %v", reloadedTombstone.SourceMessageIDs)
+	}
+}

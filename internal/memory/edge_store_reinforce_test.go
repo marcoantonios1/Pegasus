@@ -216,6 +216,76 @@ func TestEdgeStore_FindMatchingEdge(t *testing.T) {
 	}
 }
 
+// TestEdgeStore_FindMatchingEdge_ExcludesTombstone is the delete-
+// exclusion fix's confirm-then-fix test (requirement 6): a LIVE
+// tombstone (superseded_by IS NULL, source_type=user_deletion — exactly
+// what SoftDelete leaves behind) with the same subject/predicate/object
+// as what a normal, non-correction triple would match must NOT be
+// returned by FindMatchingEdge. Before the fix, it was: a tombstone is
+// live by every other criterion this method checks, so a fact the user
+// later reasserts would get "reinforced" into the zero-confidence
+// tombstone instead of creating a fresh edge — permanently unable to be
+// relearned.
+func TestEdgeStore_FindMatchingEdge_ExcludesTombstone(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := NewEntityStore(pool)
+	edgeStore := NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "FindMatchingEdge Tombstone Subject")
+
+	olives := "olives"
+	tombstone := &Edge{
+		SubjectID: subject.ID, Predicate: "dislikes", ObjectLiteral: &olives,
+		Confidence: 0, Importance: 0, SourceType: SourceTypeUserDeletion,
+		SourceWeight: 1.0, DecayRate: DecayRateStable,
+	}
+	if err := edgeStore.Create(ctx, tombstone); err != nil {
+		t.Fatalf("create tombstone: %v", err)
+	}
+
+	match, err := edgeStore.FindMatchingEdge(ctx, subject.ID, "dislikes", nil, &olives)
+	if err != nil {
+		t.Fatalf("FindMatchingEdge: %v", err)
+	}
+	if match != nil {
+		t.Errorf("expected FindMatchingEdge to never match a tombstone, got %+v", match)
+	}
+}
+
+// TestEdgeStore_FindLiveEdgesBySubjectAndPredicate_ExcludesTombstone
+// covers the same requirement for the correction-target candidate
+// lookup: a live tombstone must never appear among a correction's
+// candidates, or a tombstone could be picked as a correction target
+// (superseding a confidence-0/importance-0 dead marker with a
+// "correction" makes no sense — there is nothing live there to correct).
+func TestEdgeStore_FindLiveEdgesBySubjectAndPredicate_ExcludesTombstone(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := NewEntityStore(pool)
+	edgeStore := NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "FindLiveEdges Tombstone Subject")
+
+	olives := "olives"
+	tombstone := &Edge{
+		SubjectID: subject.ID, Predicate: "dislikes", ObjectLiteral: &olives,
+		Confidence: 0, Importance: 0, SourceType: SourceTypeUserDeletion,
+		SourceWeight: 1.0, DecayRate: DecayRateStable,
+	}
+	if err := edgeStore.Create(ctx, tombstone); err != nil {
+		t.Fatalf("create tombstone: %v", err)
+	}
+
+	candidates, err := edgeStore.FindLiveEdgesBySubjectAndPredicate(ctx, subject.ID, "dislikes")
+	if err != nil {
+		t.Fatalf("FindLiveEdgesBySubjectAndPredicate: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Errorf("expected zero live candidates (the only live edge is a tombstone), got %+v", candidates)
+	}
+}
+
 // TestEdgeStore_FindMatchingEdge_NeverReturnsSupersededEdge is the
 // stale-resurrection fix's own unit test (requirement 12): once an edge
 // is superseded, FindMatchingEdge must never return it again for the

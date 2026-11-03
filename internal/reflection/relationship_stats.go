@@ -262,10 +262,10 @@ func median(values []float64) float64 {
 	return (sorted[mid-1] + sorted[mid]) / 2
 }
 
-// countExplicitSignalEdges counts current (non-superseded) nickname_is and
-// inside_joke_ref edges with contactID as subject — §10's "explicit
-// signals" component, drawn from the predicate vocabulary already built
-// (internal/extraction.Predicates).
+// countExplicitSignalEdges counts current (non-superseded,
+// non-tombstone) nickname_is and inside_joke_ref edges with contactID as
+// subject — §10's "explicit signals" component, drawn from the predicate
+// vocabulary already built (internal/extraction.Predicates).
 //
 // Only checks contactID as subject, not object: EdgeStore's
 // GetBySubjectAndPredicate is subject-only by design (edge_store.go), and
@@ -273,6 +273,14 @@ func median(values []float64) float64 {
 // component (10% of the closeness weight) isn't worth the new query
 // surface. Known simplification: an inside_joke_ref edge extracted with
 // contactID only as the object, not the subject, won't be counted here.
+//
+// Excludes tombstones (memory.IsTombstone) as well as superseded edges —
+// the delete-exclusion audit's one real finding in this package
+// (requirement 9/15): GetBySubjectAndPredicate is deliberately
+// unfiltered (see its own doc comment) and SoftDelete leaves a LIVE
+// tombstone with the SAME predicate as whatever it replaced, so checking
+// only SupersededBy == nil used to still count a deleted nickname as an
+// "explicit signal" Marco had explicitly asked to remove.
 func countExplicitSignalEdges(ctx context.Context, edgeStore *memory.EdgeStore, contactID uuid.UUID) (int, error) {
 	count := 0
 	for _, predicate := range [...]string{"nickname_is", "inside_joke_ref"} {
@@ -281,7 +289,7 @@ func countExplicitSignalEdges(ctx context.Context, edgeStore *memory.EdgeStore, 
 			return 0, err
 		}
 		for _, e := range edges {
-			if e.SupersededBy == nil {
+			if e.SupersededBy == nil && !memory.IsTombstone(*e) {
 				count++
 			}
 		}

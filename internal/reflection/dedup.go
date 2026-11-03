@@ -99,6 +99,18 @@ func (c DedupConfig) withDefaults() DedupConfig {
 // survivor or chain supersession in a confusing way; neither is useful,
 // so this pass only ever looks at edges that are still current.
 //
+// Tombstones (memory.IsTombstone) are excluded the same way, for a
+// related but distinct reason — the delete-exclusion audit's own
+// finding here: a tombstone IS live (SupersededBy == nil) by every other
+// criterion, and by construction (SoftDelete, delete_memory.go) shares
+// the SAME subject/predicate/object the edge it replaced had, so a
+// later, genuinely live edge asserting a similar fact can land in the
+// same subject+predicate+similarity cluster as it. Without this
+// exclusion, the survivor-picking rule (earliest FirstSeen) could make
+// the tombstone itself the survivor — a confidence-0/importance-0
+// deletion marker absorbing a real live edge's source_message_ids,
+// corrupting it, exactly backward from what a delete is supposed to do.
+//
 // Merging is never deletion (EdgeStore.Delete is intentionally
 // unimplemented, edges are never hard-deleted). For each cluster of 2+
 // duplicate edges:
@@ -137,7 +149,7 @@ func MergeDuplicates(ctx context.Context, store *memory.EdgeStore, candidates []
 
 	live := make([]*memory.Edge, 0, len(candidates))
 	for _, e := range candidates {
-		if e.SupersededBy == nil {
+		if e.SupersededBy == nil && !memory.IsTombstone(*e) {
 			live = append(live, e)
 		}
 	}

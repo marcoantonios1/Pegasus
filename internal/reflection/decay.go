@@ -58,6 +58,18 @@ type DecayResult struct {
 // (and downstream consumers having to handle) a decay value for it would
 // be wasted work with no reader.
 //
+// Tombstones (memory.IsTombstone) are NOT specially excluded here —
+// checked as part of the delete-exclusion audit and confirmed harmless,
+// not a bug: a tombstone is live (passes the SupersededBy check above)
+// and gets a DecayResult like any other live edge, but
+// EffectiveConfidence(tombstone, now) is already exactly 0 regardless of
+// elapsed time (Confidence=0 decays to 0*anything=0) — the same answer
+// a tombstone-aware exclusion would produce, just computed rather than
+// special-cased. No fix needed, unlike MergeDuplicates' candidate filter
+// or countExplicitSignalEdges (reflection/relationship_stats.go), where
+// the same audit found a tombstone genuinely corrupting a result rather
+// than trivially agreeing with the correct answer.
+//
 // This is a pure computation step, not a scheduled job — it has no
 // ticker or trigger of its own. It's meant to be called from wherever the
 // consolidation orchestrator sequences §9's pipeline stages, the same

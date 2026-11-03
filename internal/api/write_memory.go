@@ -87,13 +87,24 @@ func (a *API) UpdateMemory(ctx context.Context, edgeID uuid.UUID, fields UpdateM
 // are never hard-deleted anywhere in this system, including through this
 // API. EdgeStore.Delete is intentionally unimplemented (edge_store.go),
 // and DeleteMemory does not add a different path to real removal — a
-// "deleted" edge remains a real row, still directly queryable by ID
-// (EdgeStore.GetByID) or via GetRelationshipHistory (which deliberately
-// includes superseded edges), and only disappears from
-// GetRelevantContext's default results because its zero confidence/
-// importance put it below IsPruneCandidate's floors, the same mechanism
-// that excludes any other low-value edge — not because it was special-
-// cased as "deleted."
+// "deleted" edge (and the tombstone that replaces it) remains a real
+// row, still directly queryable by ID (EdgeStore.GetByID) or via
+// GetRelationshipHistory (which deliberately includes superseded edges
+// and tombstones both — reconstructing a relationship's history must
+// show that something was deleted, not hide it).
+//
+// Default retrieval (GetRelevantContext, SearchMemory) IS special-cased
+// as deleted, explicitly: memory.IsTombstone (source_type =
+// SourceTypeUserDeletion) is checked directly by the shared
+// memory.searchFiltersWhere SQL fragment both SearchRelevant and
+// SearchByText build on, unconditionally, regardless of confidence or
+// importance. This used to be incidental — only a side effect of the
+// tombstone's zero confidence/importance falling below
+// IsPruneCandidate's floors, which GetRelevantContext applies but
+// SearchMemory deliberately never did (see its own doc comment), leaving
+// a deleted fact findable by keyword search forever. That gap is fixed;
+// exclusion from default retrieval is now a deliberate rule, not a
+// coincidence of two other numbers happening to be zero.
 func (a *API) DeleteMemory(ctx context.Context, edgeID uuid.UUID) error {
 	if _, err := a.edges.SoftDelete(ctx, edgeID); err != nil {
 		return fmt.Errorf("DeleteMemory(%s): %w", edgeID, err)

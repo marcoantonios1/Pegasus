@@ -44,8 +44,27 @@ type SearchFilters struct {
 	Since       *time.Time
 }
 
+// searchFiltersWhere is the ONE shared WHERE fragment SearchRelevant and
+// SearchByText both build their queries on — the actual mechanism (not
+// just a comment's claim) by which GetRelevantContext, GetContact's
+// top-edges query (built on GetRelevantContext/SearchRelevant), and
+// SearchMemory (SearchByText) can never diverge on what counts as
+// excluded-by-default. The `e.source_type != '...'` line excludes
+// tombstones (memory.IsTombstone's definition — source_type =
+// SourceTypeUserDeletion, delete_memory.go) EXPLICITLY, alongside the
+// superseded-edge exclusion that was already here: before this fix,
+// nothing here excluded a tombstone at all, and SearchByText in
+// particular has no other mechanism that would (it deliberately skips
+// IsPruneCandidate — see its own doc comment) — a deleted fact's
+// tombstone matched a keyword search forever. This is a DELIBERATE,
+// SEPARATE rule from pruning, not a substitute for it: a tombstone is
+// excluded here unconditionally, regardless of confidence/importance,
+// while IsPruneCandidate (applied only by GetRelevantContext, in Go,
+// after this SQL) is a completely independent, decay-dependent gate that
+// SearchByText still does not apply.
 const searchFiltersWhere = `
 	e.superseded_by IS NULL
+	AND e.source_type != '` + SourceTypeUserDeletion + `'
 	AND ($1::uuid IS NULL OR e.subject_id = $1)
 	AND ($2::text[] IS NULL OR e.source_type = ANY($2))
 	AND ($3::timestamptz IS NULL OR e.first_seen >= $3)
@@ -91,10 +110,12 @@ func scanEdgeRow(row interface {
 // EdgeCandidate.Similarity is 0 in that case, and the caller's ranking
 // formula naturally reduces to its confidence/importance terms.
 //
-// Always excludes superseded edges (superseded_by IS NULL) — every read
-// method in internal/api excludes them by default except
-// GetRelationshipHistory, which needs the full history on purpose (see
-// that method's own doc comment for why it's the exception).
+// Always excludes superseded edges (superseded_by IS NULL) AND
+// tombstones (memory.IsTombstone — source_type = SourceTypeUserDeletion),
+// both via searchFiltersWhere — every read method in internal/api
+// excludes them by default except GetRelationshipHistory/GetByID, which
+// need the full record on purpose (see each one's own doc comment for
+// why it's the exception).
 //
 // Deliberately applies no confidence/importance pruning filter here —
 // IsPruneCandidate (prune_candidate.go) depends on EffectiveConfidence, a
@@ -199,8 +220,16 @@ func (s *EdgeStore) SearchRelevant(ctx context.Context, queryVector []float32, f
 // parameterized either way (no SQL injection risk existed here); this is
 // purely about matching what the caller actually typed.
 //
-// Always excludes superseded edges, same as SearchRelevant, and for the
-// same reason.
+// Always excludes superseded edges AND tombstones, same as
+// SearchRelevant and for the same reason (searchFiltersWhere) — this is
+// the fix for a real bug: SearchMemory deliberately does NOT apply
+// IsPruneCandidate (see api.SearchMemory's own doc comment — an explicit
+// keyword lookup shouldn't hide a faded-but-real fact), which used to
+// mean nothing here excluded a deleted fact's tombstone at all; it would
+// match a keyword search in the object/predicate/subject-name forever.
+// Tombstone exclusion is deliberately NOT part of that pruning
+// discussion — it is a separate, unconditional rule applied here at the
+// SQL level, regardless of confidence/importance/pruning configuration.
 func (s *EdgeStore) SearchByText(ctx context.Context, queryText string, filters SearchFilters, limit int) ([]*Edge, error) {
 	escaped := escapeLikePattern(queryText)
 
@@ -241,11 +270,15 @@ func (s *EdgeStore) SearchByText(ctx context.Context, queryText string, filters 
 // where the contact is the subject.
 //
 // Unlike every other query method in this file, this one does NOT
-// exclude superseded edges — see api.GetRelationshipHistory's doc
-// comment, the sole caller this method exists for: reconstructing how a
-// relationship's facts changed over time requires the superseded history,
-// not just current state. Ordered by first_seen ascending (oldest first)
-// for exactly that reason — this is meant to be read as a timeline.
+// exclude superseded edges, and (deliberately, same reasoning) does not
+// exclude tombstones (memory.IsTombstone) either — see
+// api.GetRelationshipHistory's doc comment, the sole caller this method
+// exists for: reconstructing how a relationship's facts changed over
+// time requires the superseded history, not just current state, and a
+// tombstone IS part of that history — it's the record that something
+// was deleted, at a specific point in the timeline, not noise to filter
+// out of it. Ordered by first_seen ascending (oldest first) for exactly
+// that reason — this is meant to be read as a timeline.
 func (s *EdgeStore) GetBySubjectOrObject(ctx context.Context, entityID uuid.UUID) ([]*Edge, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+edgeColumns+`

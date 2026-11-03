@@ -117,6 +117,15 @@ func (f Filters) searchFilters() memory.SearchFilters {
 // ranking then depends only on the Confidence/Importance weight terms.
 //
 // topN is clamped to [1, MaxTopN]; DefaultTopN is used for topN <= 0.
+//
+// IsPruneCandidate (rankAndFilter, below) is unchanged by the delete-
+// exclusion fix — it is still the only thing gating confidence/
+// importance here, via IncludePruned. Tombstone exclusion is a separate
+// concern, already handled upstream of rankAndFilter entirely: a.edges.
+// SearchRelevant never returns a tombstone in the first place (it's
+// excluded at the SQL level, memory.searchFiltersWhere), so this
+// method's own ranking/pruning logic never sees one to make a decision
+// about either way.
 func (a *API) GetRelevantContext(ctx context.Context, query string, filters Filters, topN int) ([]*memory.Edge, error) {
 	topN = clampTopN(topN)
 
