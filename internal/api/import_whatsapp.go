@@ -173,12 +173,19 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 		// adapter shouldn't produce but isn't guaranteed not to) have no
 		// extraction path at all — stored and marked processed immediately,
 		// same as before this issue.
+		// Image/video and a nil-Text text entry both end up Processed=true
+		// immediately either way (new or already existing — see
+		// CreateIfAbsent's own doc comment), so there is nothing further
+		// to do for either branch regardless of `created`: idempotency
+		// here is purely about not inserting a duplicate ROW, which
+		// CreateIfAbsent itself already guarantees.
 		if r.MediaType != ingestion.MediaTypeText && r.MediaType != ingestion.MediaTypeVoice {
 			msg := &memory.Message{
 				ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 				RawText: r.Text, MediaRef: r.MediaURL, Processed: true, Timestamp: r.Timestamp,
+				ExternalID: a.messageExternalID(r.ExternalID),
 			}
-			if err := a.messages.Create(ctx, msg); err != nil {
+			if _, err := a.messages.CreateIfAbsent(ctx, msg); err != nil {
 				return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 			}
 			continue
@@ -187,8 +194,9 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			msg := &memory.Message{
 				ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 				RawText: r.Text, MediaRef: r.MediaURL, Processed: true, Timestamp: r.Timestamp,
+				ExternalID: a.messageExternalID(r.ExternalID),
 			}
-			if err := a.messages.Create(ctx, msg); err != nil {
+			if _, err := a.messages.CreateIfAbsent(ctx, msg); err != nil {
 				return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 			}
 			continue
@@ -197,10 +205,26 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 		msg := &memory.Message{
 			ConversationID: conversationID, SenderID: sender.ID, MediaType: r.MediaType,
 			RawText: r.Text, MediaRef: r.MediaURL, Processed: false, Timestamp: r.Timestamp,
+			ExternalID: a.messageExternalID(r.ExternalID),
 		}
-		if err := a.messages.Create(ctx, msg); err != nil {
+		created, err := a.messages.CreateIfAbsent(ctx, msg)
+		if err != nil {
 			return result, fmt.Errorf("ImportWhatsApp: store message: %w", err)
 		}
+		if !created && msg.Processed {
+			// Already fully processed in a prior run of this same import
+			// (requirement 6a): skip entirely — no windowing, no triage,
+			// no extraction, no transcription, no reinforcement. msg.
+			// Transcript/TranscriptConfidence were already overwritten
+			// onto msg by CreateIfAbsent, but nothing here reads them
+			// since this message contributes nothing further either way.
+			continue
+		}
+		// Either a brand-new row, or an existing one that's still
+		// unprocessed (a prior run died mid-import, or a voice message's
+		// transcription failed last time) — continue processing it
+		// normally either way (requirement 6b): this is what makes an
+		// interrupted import resumable rather than just duplicate-safe.
 
 		text := ""
 		if r.MediaType == ingestion.MediaTypeText {

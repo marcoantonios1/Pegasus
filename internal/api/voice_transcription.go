@@ -231,6 +231,18 @@ func (a *API) transcribeVoiceMessage(ctx context.Context, msgID uuid.UUID, audio
 // once it knows whether there's anything further to attempt (see
 // resolveTextForTriage / ProcessLiveMessage / ImportWhatsApp).
 func (a *API) transcribeAndStore(ctx context.Context, msg *memory.Message, mediaRef *string, fetcher AudioFetcher) (string, bool) {
+	// Resume case (message-ingestion idempotency fix, requirement 6b's
+	// voice-specific cost note): msg already carries a transcript — set
+	// either earlier in THIS call (impossible, this is the first touch)
+	// or, more to the point, loaded onto msg by CreateIfAbsent from a
+	// prior run's existing, unprocessed row (a transcription that
+	// succeeded but the import then died before marking the message
+	// processed). Reuse it rather than paying Speaches/OpenAI again for
+	// audio that's already been transcribed.
+	if msg.Transcript != nil {
+		return *msg.Transcript, true
+	}
+
 	if fetcher == nil {
 		a.logf("transcribeAndStore: no AudioFetcher configured, message %s stays untranscribed", msg.ID)
 		return "", false
