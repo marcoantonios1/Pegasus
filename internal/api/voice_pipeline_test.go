@@ -206,7 +206,12 @@ func TestImportWhatsApp_MixedTextAndVoiceWindow_UsesVoiceTranscriptSourceType(t 
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "BulkMixedConv.txt")
+	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
+	// comment on the same pattern: conversation_id derives from the
+	// filename, and a fixed name would let message-ingestion idempotency
+	// recognize this run's messages as already-processed leftovers from
+	// an earlier run of this same test.
+	exportPath := filepath.Join(dir, "BulkMixedConv-"+uuid.New().String()+".txt")
 
 	voiceFilename := "mixed-note.opus"
 	if err := os.WriteFile(filepath.Join(dir, voiceFilename), []byte("audio"), 0o644); err != nil {

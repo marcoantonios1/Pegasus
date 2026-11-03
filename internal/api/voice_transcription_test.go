@@ -193,6 +193,32 @@ func TestTranscribeAndStore_NoFetcherConfigured(t *testing.T) {
 	}
 }
 
+// TestTranscribeAndStore_ExistingTranscriptIsReused covers requirement
+// 15 of the message-ingestion idempotency fix: a message that already
+// carries a transcript (loaded onto msg by MessageStore.CreateIfAbsent
+// from a prior run's existing, unprocessed row — see
+// transcribeAndStore's own doc comment) is returned as-is, without ever
+// calling the transcriber again — no fetcher, no media_ref even needed,
+// since reuse short-circuits before either is touched.
+func TestTranscribeAndStore_ExistingTranscriptIsReused(t *testing.T) {
+	transcriber := &fakeTranscriber{}
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
+
+	existing := "already transcribed in a prior run"
+	msg := &memory.Message{ID: uuid.New(), Transcript: &existing}
+
+	text, ok := a.transcribeAndStore(context.Background(), msg, nil, nil)
+	if !ok {
+		t.Fatal("expected ok=true when a transcript already exists")
+	}
+	if text != existing {
+		t.Errorf("expected the existing transcript to be returned unchanged, got %q", text)
+	}
+	if len(transcriber.calls) != 0 {
+		t.Error("expected Transcribe never called when a transcript already exists")
+	}
+}
+
 func TestTranscribeAndStore_NilMediaRef(t *testing.T) {
 	transcriber := &fakeTranscriber{}
 	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})

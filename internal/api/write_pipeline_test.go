@@ -208,7 +208,14 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "BulkConv.txt")
+	// Uuid-suffixed, not a fixed name: conversation_id is derived from
+	// the filename (minus extension), and this suite runs against a
+	// real, persistent, shared dev database with no per-test reset — a
+	// fixed name would let message-ingestion idempotency (CreateIfAbsent)
+	// correctly recognize this run's messages as already-processed
+	// leftovers from an earlier run of this same test, silently skipping
+	// windowing/extraction entirely instead of exercising it.
+	exportPath := filepath.Join(dir, "BulkConv-"+runID+".txt")
 	var export string
 	for i := 0; i < extraction.DefaultHistoricalWindowSize; i++ {
 		export += "1/1/26, 9:0" + string(rune('0'+i)) + " AM - John: message " + string(rune('0'+i)) + "\n"
