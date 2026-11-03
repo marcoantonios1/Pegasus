@@ -478,60 +478,21 @@ func TestStoreExtractedTriples_LiveEdgeAlreadyHoldingValueIsReinforced(t *testin
 	}
 }
 
-// TestFindMatchingEdge_IncludesSupersededEdges pins the behavior
-// requirement 12 requires: after a correction supersedes "Dubai",
-// re-extracting "Dubai" through the NORMAL (non-correction) path must
-// reinforce the superseded edge, NOT create a second, live "Dubai" edge
-// that would contradict the correction. This is CURRENTLY load-bearing
-// in FindMatchingEdge (see its own doc comment) — any future change to
-// FindMatchingEdge must preserve this deliberately, not accidentally
-// break it while "fixing" something else.
-func TestFindMatchingEdge_IncludesSupersededEdges(t *testing.T) {
-	ts := newTestStores(t)
-	ctx := context.Background()
-
-	subject := createTestEntity(t, ctx, ts, "person", "Pin Test Subject "+uuid.New().String())
-	dubaiLit := "Dubai"
-	dubaiEdge := &memory.Edge{SubjectID: subject.ID, Predicate: "event_present", ObjectLiteral: &dubaiLit,
-		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0, DecayRate: memory.DecayRateStable}
-	if err := ts.edges.Create(ctx, dubaiEdge); err != nil {
-		t.Fatalf("create dubai edge: %v", err)
-	}
-	if _, err := ts.edges.CorrectMemory(ctx, dubaiEdge.ID, memory.CorrectionInput{
-		SubjectID: subject.ID, Predicate: "event_present", ObjectLiteral: strPtrLocal("Beirut"),
-	}); err != nil {
-		t.Fatalf("supersede dubai edge: %v", err)
-	}
-
-	// Re-extract "Dubai" through the NORMAL (non-correction) path.
-	msg := createTestMessage(t, ctx, ts, uuid.New(), subject.ID, "text", time.Now())
-	triples := []extraction.ExtractedTriple{
-		{Subject: subject.CanonicalName, Predicate: "event_present", Object: "Dubai", ObjectType: "literal", Confidence: 0.7},
-	}
-
-	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
-	outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, []uuid.UUID{msg.ID}, time.Now())
-	if err != nil {
-		t.Fatalf("storeExtractedTriples: %v", err)
-	}
-	if len(outcomes) != 1 || outcomes[0].Action != TripleActionReinforced {
-		t.Fatalf("expected re-extracting the OLD value to reinforce the superseded edge, got %+v — if this is now Created, FindMatchingEdge's superseded-inclusion broke", outcomes)
-	}
-	if outcomes[0].Edge.ID != dubaiEdge.ID {
-		t.Errorf("expected the reinforced edge to be the original superseded Dubai edge %s, got %s", dubaiEdge.ID, outcomes[0].Edge.ID)
-	}
-
-	var liveDubaiCount int
-	if err := ts.pool.QueryRow(ctx, `
-		SELECT count(*) FROM edges
-		WHERE subject_id = $1 AND predicate = 'event_present' AND object_literal = 'Dubai' AND superseded_by IS NULL
-	`, subject.ID).Scan(&liveDubaiCount); err != nil {
-		t.Fatalf("count live dubai edges: %v", err)
-	}
-	if liveDubaiCount != 0 {
-		t.Errorf("expected NO live Dubai edge to exist (it should still be superseded, not resurrected as a new live edge), got %d", liveDubaiCount)
-	}
-}
+// TestFindMatchingEdge_IncludesSupersededEdges used to pin the opposite
+// of what's now correct: it asserted that re-extracting a corrected-away
+// value ("Dubai", after a correction to "Beirut") reinforced the dead
+// "Dubai" edge rather than creating a new one. That was Issue 32's
+// follow-up bug, not a feature — see FindMatchingEdge's own doc comment
+// (internal/memory/edge_store.go) and this file's note above
+// TestStoreExtractedTriples_ConcurrentCorrectionRaceIsSkippedNotFatal.
+// DELETED, not updated in place: its assertions directly contradict the
+// new, correct behavior, which is now covered instead by
+// stale_resurrection_test.go (TestStoreExtractedTriples_
+// ReassertionAfterCorrectionCreatesNewLiveEdge for the "this actually
+// should create a new edge" case it used to assert against, and
+// TestStoreExtractedTriples_StaleResurrectionIsSkipped for the
+// out-of-order-replay case that method's new live-only behavior,
+// combined with isStaleResurrection, now has to get right instead).
 
 // TestStoreExtractedTriples_ConcurrentCorrectionRaceIsSkippedNotFatal
 // covers requirement 13: two genuinely concurrent storeExtractedTriples

@@ -215,3 +215,95 @@ func TestEdgeStore_FindMatchingEdge(t *testing.T) {
 		t.Fatalf("expected no match for a different predicate even with the same object, got %+v", noMatchPredicate)
 	}
 }
+
+// TestEdgeStore_FindMatchingEdge_NeverReturnsSupersededEdge is the
+// stale-resurrection fix's own unit test (requirement 12): once an edge
+// is superseded, FindMatchingEdge must never return it again for the
+// same exact object, even though the object text is unchanged. This is
+// the opposite of this method's old, deliberately-reverted behavior —
+// see FindMatchingEdge's own doc comment for why including superseded
+// edges turned out to be a real bug (silent resurrection of corrected-
+// away facts), not a safe simplification.
+func TestEdgeStore_FindMatchingEdge_NeverReturnsSupersededEdge(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := NewEntityStore(pool)
+	edgeStore := NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "FindMatchingEdge Superseded Test Subject")
+
+	acme := "Acme"
+	edge := &Edge{
+		SubjectID: subject.ID, Predicate: "works_at", ObjectLiteral: &acme,
+		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text",
+		SourceWeight: 1.0, DecayRate: DecayRateStable,
+	}
+	if err := edgeStore.Create(ctx, edge); err != nil {
+		t.Fatalf("create edge: %v", err)
+	}
+
+	globex := "Globex"
+	if _, err := edgeStore.CorrectMemory(ctx, edge.ID, CorrectionInput{
+		SubjectID: subject.ID, Predicate: "works_at", ObjectLiteral: &globex,
+	}); err != nil {
+		t.Fatalf("supersede edge: %v", err)
+	}
+
+	match, err := edgeStore.FindMatchingEdge(ctx, subject.ID, "works_at", nil, &acme)
+	if err != nil {
+		t.Fatalf("FindMatchingEdge: %v", err)
+	}
+	if match != nil {
+		t.Errorf("expected FindMatchingEdge to never return a superseded edge, got %+v", match)
+	}
+}
+
+// TestEdgeStore_FindSupersededMatches_OnlyReturnsSupersededEdges is the
+// stale-resurrection fix's unit test for FindSupersededMatches' own
+// contract: it must return the dead "Acme" edge (exact object match,
+// superseded), and must NOT return the live "Globex" edge that
+// superseded it, even though both share the same subject+predicate.
+func TestEdgeStore_FindSupersededMatches_OnlyReturnsSupersededEdges(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := NewEntityStore(pool)
+	edgeStore := NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "FindSupersededMatches Test Subject")
+
+	acme := "Acme"
+	edge := &Edge{
+		SubjectID: subject.ID, Predicate: "works_at", ObjectLiteral: &acme,
+		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text",
+		SourceWeight: 1.0, DecayRate: DecayRateStable,
+	}
+	if err := edgeStore.Create(ctx, edge); err != nil {
+		t.Fatalf("create edge: %v", err)
+	}
+
+	globex := "Globex"
+	corrected, err := edgeStore.CorrectMemory(ctx, edge.ID, CorrectionInput{
+		SubjectID: subject.ID, Predicate: "works_at", ObjectLiteral: &globex,
+	})
+	if err != nil {
+		t.Fatalf("supersede edge: %v", err)
+	}
+
+	matches, err := edgeStore.FindSupersededMatches(ctx, subject.ID, "works_at", nil, &acme)
+	if err != nil {
+		t.Fatalf("FindSupersededMatches: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != edge.ID {
+		t.Fatalf("expected exactly the superseded Acme edge, got %+v", matches)
+	}
+
+	noMatches, err := edgeStore.FindSupersededMatches(ctx, subject.ID, "works_at", nil, &globex)
+	if err != nil {
+		t.Fatalf("FindSupersededMatches: %v", err)
+	}
+	for _, m := range noMatches {
+		if m.ID == corrected.ID {
+			t.Errorf("expected the live Globex edge never to be returned as a superseded match, got %+v", noMatches)
+		}
+	}
+}
