@@ -48,16 +48,28 @@ func resolveTestSelfEntity(t *testing.T, ctx context.Context, ts *testStores, se
 // the new edge's hardcoded correction fields, the TripleOutcome, and
 // both read paths (GetRelevantContext excludes the old edge,
 // GetRelationshipHistory includes both).
+//
+// Uses a uuid-suffixed predicate, not a real "event_present" — confirmed
+// necessary, not just defensive: this suite's self entity is SHARED
+// (entities_single_self_idx permits at most one is_self=true row, ever),
+// so a prior run of this same test leaves a live "Beirut" edge behind,
+// which a later run's own rule-(b) check ("does a live candidate already
+// hold the NEW value?") would match BEFORE ever looking at the "Dubai"
+// edge this run just created — silently reinforcing the OLD run's edge
+// instead of superseding this run's, and failing this test's own
+// assertion. Running this test with -count=2 reproduced exactly that
+// failure before this fix.
 func TestProcessLiveMessage_CorrectionEndToEnd(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
 
 	selfExternalID := "live-correction-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	predicate := "live_correction_predicate_" + uuid.New().String()
 
 	existingLit := "Dubai"
 	existingEdge := &memory.Edge{
-		SubjectID: self.ID, Predicate: "event_present", ObjectLiteral: &existingLit,
+		SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &existingLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0,
 		DecayRate: memory.DecayRateStable,
 	}
@@ -69,7 +81,7 @@ func TestProcessLiveMessage_CorrectionEndToEnd(t *testing.T) {
 	oldValue := "Dubai"
 	correctionIdx := 9 // last message in the window that closes (see below)
 	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "event_present", Object: "Beirut", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "Beirut", ObjectType: "literal",
 			Confidence: 0.95, IsCorrection: true, CorrectionSourceIndex: &correctionIdx, ReplacesObject: &oldValue},
 	}}
 
@@ -144,17 +156,22 @@ func TestProcessLiveMessage_CorrectionEndToEnd(t *testing.T) {
 // 8: two live event_present edges exist for the same subject (a
 // multi-valued predicate) — one naming the old value, one unrelated. A
 // correction naming the old value via ReplacesObject must supersede ONLY
-// the matching edge; the unrelated one is untouched.
+// the matching edge; the unrelated one is untouched. Uses a uuid-suffixed
+// predicate for the same reproduced-and-fixed isolation reason as
+// TestProcessLiveMessage_CorrectionEndToEnd (a leftover live "living in
+// Beirut" edge from a prior run would otherwise satisfy rule (b) before
+// this run's own "living in Dubai" edge is ever considered).
 func TestStoreExtractedTriples_MultiValuedDisambiguation(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
 
 	selfExternalID := "disambig-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	predicate := "disambig_predicate_" + uuid.New().String()
 
 	dubaiLit := "living in Dubai"
 	dubaiEdge := &memory.Edge{
-		SubjectID: self.ID, Predicate: "event_present", ObjectLiteral: &dubaiLit,
+		SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &dubaiLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0,
 		DecayRate: memory.DecayRateStable,
 	}
@@ -163,7 +180,7 @@ func TestStoreExtractedTriples_MultiValuedDisambiguation(t *testing.T) {
 	}
 	unrelatedLit := "working on a new project"
 	unrelatedEdge := &memory.Edge{
-		SubjectID: self.ID, Predicate: "event_present", ObjectLiteral: &unrelatedLit,
+		SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &unrelatedLit,
 		Confidence: 0.7, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0,
 		DecayRate: memory.DecayRateStable,
 	}
@@ -175,7 +192,7 @@ func TestStoreExtractedTriples_MultiValuedDisambiguation(t *testing.T) {
 	idx := 0
 	oldValue := "living in Dubai"
 	triples := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "event_present", Object: "living in Beirut", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "living in Beirut", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 	}
 
@@ -280,9 +297,16 @@ func TestStoreExtractedTriples_ReplacesObjectMatchingNoneIsSkipped(t *testing.T)
 
 	selfExternalID := "no-match-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	// uuid-suffixed predicate — confirmed necessary, not just defensive:
+	// running this test with -count=3 against a real predicate name
+	// ("has_birthday") reproduced a real flake, because a leftover live
+	// "March" edge from an earlier run's own object value satisfied rule
+	// (b) ("a live candidate already holds the NEW value") before this
+	// run's own ReplacesObject mismatch was ever evaluated.
+	predicate := "no_match_predicate_" + uuid.New().String()
 
 	existingLit := "April"
-	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
+	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &existingLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0, DecayRate: memory.DecayRateStable}
 	if err := ts.edges.Create(ctx, existingEdge); err != nil {
 		t.Fatalf("create existing edge: %v", err)
@@ -292,7 +316,7 @@ func TestStoreExtractedTriples_ReplacesObjectMatchingNoneIsSkipped(t *testing.T)
 	idx := 0
 	wrongOld := "December" // doesn't match the existing edge's "April"
 	triples := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "March", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &wrongOld},
 	}
 
