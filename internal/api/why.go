@@ -93,6 +93,13 @@ type Belief struct {
 // query over data that already exists — no new confidence/importance
 // computation happens here, only formatting and joins against messages/
 // entities to explain an edge's provenance.
+//
+// Works unchanged on a tombstone's own edgeID, and SupersededByLabel
+// (via describeEdge) resolves to a tombstone's own "predicate: object"
+// label when the edge being explained was deleted — deliberately not
+// special-cased, same as GetByID itself (EdgeStore.GetByID's own doc
+// comment): this is a direct-by-ID explanation, not default retrieval,
+// so the delete-exclusion fix's searchFiltersWhere has no bearing here.
 func (a *API) WhyDoWeBelieveThis(ctx context.Context, edgeID uuid.UUID) (*Belief, error) {
 	edge, err := a.edges.GetByID(ctx, edgeID)
 	if err != nil {

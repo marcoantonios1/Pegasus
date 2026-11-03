@@ -13,6 +13,21 @@ import (
 // true, it's asserting there is no fact here anymore.
 const SourceTypeUserDeletion = "user_deletion"
 
+// IsTombstone reports whether e is a deletion marker — the ONE explicit
+// definition "deleted" has anywhere in this schema (there is no
+// is_deleted column; see this file's own doc comment on SoftDelete for
+// why source_type is the marker instead). Checks SourceType only, by
+// design: confidence=0/importance=0 also happen to be true of a
+// tombstone (SoftDelete sets them), but defining "deleted" in terms of
+// those would conflate it with "a real, non-deleted fact that simply
+// decayed or was scored unimportant" — a genuinely different case
+// SearchMemory's own doc comment is explicit must still be returned by a
+// keyword lookup. source_type is the only field that distinguishes "this
+// row IS the deletion" from "this row just happens to score low."
+func IsTombstone(e Edge) bool {
+	return e.SourceType == SourceTypeUserDeletion
+}
+
 // SoftDelete implements api.DeleteMemory's storage layer. Edges are never
 // hard-deleted (see EdgeStore.Delete's own doc comment, below) — no
 // schema column exists for "deleted" any more than one exists for
@@ -30,13 +45,22 @@ const SourceTypeUserDeletion = "user_deletion"
 // CorrectMemory call followed by a patch-up.
 //
 // Deliberately does NOT set DecayLocked or IsCorrection on the tombstone,
-// unlike a real correction. IsPruneCandidate (prune_candidate.go)
-// short-circuits to "never prune" when either flag is true — setting
-// either here would make the tombstone immune to the very default-
-// retrieval exclusion DeleteMemory exists to produce. Confidence=0 and
-// Importance=0 already put the tombstone below both of
-// IsPruneCandidate's floors through its normal (non-short-circuited)
-// path — that's what actually does the excluding.
+// unlike a real correction — semantically a tombstone is neither of
+// those things.
+//
+// Exclusion from default retrieval is now EXPLICIT, not incidental: see
+// IsTombstone and memory.searchFiltersWhere, which SearchRelevant and
+// SearchByText both build on specifically so they can't diverge. Before
+// that fix, the only thing that excluded a tombstone from
+// GetRelevantContext was the SIDE EFFECT of Confidence=0/Importance=0
+// falling below IsPruneCandidate's floors — which meant SearchByText
+// (SearchMemory's own query, which deliberately does NOT apply
+// IsPruneCandidate — see that method's own doc comment) had nothing at
+// all keeping a tombstone out, and a deleted fact's keyword search
+// stayed findable forever. Confidence=0/Importance=0 remain the correct
+// values for a tombstone to hold regardless (nothing about this fact is
+// true or important anymore) — they're just no longer what actually does
+// the excluding.
 //
 // The tombstone carries no source_message_ids: this is an API-driven
 // action (a caller explicitly asking to delete a fact), not something

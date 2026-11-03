@@ -748,8 +748,20 @@ func (a *API) isStaleResurrection(ctx context.Context, subjectID uuid.UUID, pred
 		}
 		if !ok {
 			sTimestamp = a.clampFutureTimestamp(superseding.FirstSeen, now, fmt.Sprintf("superseding edge %s's first_seen", superseding.ID))
-			a.logf("isStaleResurrection: superseding edge %s has no resolvable source messages, falling back to first_seen (%s)",
-				superseding.ID, superseding.FirstSeen)
+			// Using FirstSeen is the NORMAL path for a tombstone, not a
+			// fallback worth a warning: SoftDelete (delete_memory.go)
+			// never attaches source_message_ids to a tombstone at all —
+			// deletion is an API-driven action with no new source
+			// message to attribute it to (see SoftDelete's own doc
+			// comment) — so "no resolvable source messages" is exactly
+			// what every delete produces, every time, by design. Only
+			// warn when a NON-tombstone superseding edge unexpectedly
+			// has no resolvable messages, which would be the genuinely
+			// unusual case this log line exists to catch.
+			if !memory.IsTombstone(*superseding) {
+				a.logf("isStaleResurrection: superseding edge %s has no resolvable source messages, falling back to first_seen (%s)",
+					superseding.ID, superseding.FirstSeen)
+			}
 		}
 
 		if !incoming.After(sTimestamp) {

@@ -350,3 +350,49 @@ func TestRecomputeRelationshipStats_UpsertOverwritesNotAccumulates(t *testing.T)
 		t.Errorf("expected exactly 1 relationship_stats row for the contact after two recompute passes, got %d", rowCount)
 	}
 }
+
+// TestCountExplicitSignalEdges_ExcludesTombstone covers the delete-
+// exclusion audit's one real finding in this package (requirement 9/15):
+// countExplicitSignalEdges only checks SupersededBy == nil (live), with
+// no tombstone check — a soft-deleted nickname_is edge leaves a LIVE
+// tombstone (same subject/predicate/object, source_type=user_deletion)
+// that this function would otherwise still count as an "explicit
+// signal," even though the user explicitly deleted it.
+func TestCountExplicitSignalEdges_ExcludesTombstone(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+
+	contact := createTestEntity(t, ctx, entityStore, "Tombstone Nickname Contact")
+
+	nickname := "Bestie"
+	nicknameEdge := &memory.Edge{
+		SubjectID: contact.ID, Predicate: "nickname_is", ObjectLiteral: &nickname,
+		Confidence: 1.0, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateStable,
+	}
+	if err := edgeStore.Create(ctx, nicknameEdge); err != nil {
+		t.Fatalf("create nickname edge: %v", err)
+	}
+
+	before, err := countExplicitSignalEdges(ctx, edgeStore, contact.ID)
+	if err != nil {
+		t.Fatalf("countExplicitSignalEdges (before delete): %v", err)
+	}
+	if before != 1 {
+		t.Fatalf("expected 1 explicit signal before deletion, got %d", before)
+	}
+
+	if _, err := edgeStore.SoftDelete(ctx, nicknameEdge.ID); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+
+	after, err := countExplicitSignalEdges(ctx, edgeStore, contact.ID)
+	if err != nil {
+		t.Fatalf("countExplicitSignalEdges (after delete): %v", err)
+	}
+	if after != 0 {
+		t.Errorf("expected 0 explicit signals after deleting the nickname (the tombstone must not count), got %d", after)
+	}
+}

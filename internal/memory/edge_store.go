@@ -89,6 +89,15 @@ func (s *EdgeStore) Create(ctx context.Context, e *Edge) error {
 	return insertEdge(ctx, s.db, e)
 }
 
+// GetByID is a direct lookup by primary key — deliberately unfiltered,
+// including tombstones (memory.IsTombstone) and superseded edges alike.
+// A caller who already has a specific edge ID (WhyDoWeBelieveThis,
+// describeEdge's SupersededBy label, UpdateMemory) is asking about THAT
+// row, not asking for curated default retrieval — IsPruneCandidate and
+// the delete-exclusion fix's searchFiltersWhere both apply only to the
+// search/retrieval methods built on SearchRelevant/SearchByText, never
+// to this one. See GetBySubjectAndPredicate's own doc comment for the
+// same rule applied to a different direct-lookup shape.
 func (s *EdgeStore) GetByID(ctx context.Context, id uuid.UUID) (*Edge, error) {
 	var e Edge
 
@@ -150,6 +159,19 @@ func (s *EdgeStore) Update(ctx context.Context, e *Edge) error {
 // GetBySubjectAndPredicate uses the (subject_id, predicate) index from
 // migration 000002. This is the retrieval pattern GetRelevantContext() will
 // build on.
+//
+// Deliberately unfiltered — includes superseded edges AND tombstones
+// (memory.IsTombstone) both. This is the base method FindSupersededMatches
+// and reflection.countExplicitSignalEdges both call directly; each of
+// those callers makes its OWN, context-appropriate decision about
+// tombstones (FindSupersededMatches: a tombstone is a legitimate
+// superseding edge for the stale-resurrection guard to load, see
+// isStaleResurrection; countExplicitSignalEdges: explicitly excludes
+// them, since a deleted nickname isn't an "explicit signal" — see that
+// function's own doc comment) rather than this shared method making that
+// call for every caller. Do not add a tombstone filter here; add it at
+// the specific caller that needs it, the same way FindLiveEdgesBySubject
+// AndPredicate is a SEPARATE method rather than a parameter on this one.
 func (s *EdgeStore) GetBySubjectAndPredicate(ctx context.Context, subjectID uuid.UUID, predicate string) ([]*Edge, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT
@@ -232,8 +254,9 @@ func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, at, earlies
 }
 
 // FindLiveEdgesBySubjectAndPredicate is GetBySubjectAndPredicate narrowed
-// to LIVE edges only (superseded_by IS NULL) — the correction-target
-// lookup internal/api's storeExtractedTriples needs (Issue 32's fix: that
+// to LIVE, non-tombstone edges only (superseded_by IS NULL AND
+// source_type != SourceTypeUserDeletion) — the correction-target lookup
+// internal/api's storeExtractedTriples needs (Issue 32's fix: that
 // function used to call FindMatchingEdge with the triple's own NEW
 // object, which by definition can't already exist as a live edge, so
 // every correction was silently skipped — see storeExtractedTriples' own
@@ -247,10 +270,27 @@ func (s *EdgeStore) Reinforce(ctx context.Context, edgeID uuid.UUID, at, earlies
 // predicate) index GetBySubjectAndPredicate already uses) rather than
 // filtering in Go after fetching rows this caller never wants.
 //
+// Tombstone exclusion (the delete-exclusion fix) is the same reasoning
+// applied to a deletion marker specifically: a tombstone is live by
+// every OTHER criterion this method checks (superseded_by IS NULL), but
+// it isn't "a currently-live fact" in any sense a correction should be
+// able to target — there is nothing true there to correct, only a record
+// that something used to be true. Without this, a tombstone could be
+// picked as selectCorrectionTarget's correction target (internal/api/
+// pipeline.go), which makes no sense: superseding a deletion marker with
+// a "correction" conflates two different operations this codebase keeps
+// deliberately distinct (CorrectMemory vs. SoftDelete).
+//
 // As of the stale-resurrection fix, FindMatchingEdge is ALSO implemented
 // in terms of this method (it used to go through GetBySubjectAndPredicate
 // directly and deliberately include superseded edges — see its own doc
-// comment for why that turned out to be a bug, not a feature).
+// comment for why that turned out to be a bug, not a feature) — so this
+// same tombstone exclusion automatically covers FindMatchingEdge's own
+// normal-reinforcement-match use too: without it, a fact the user later
+// reasserts after deleting it would get "reinforced" into the zero-
+// confidence tombstone (bumping its timestamps, never its confidence)
+// instead of creating a fresh, genuinely live edge — permanently unable
+// to be relearned.
 func (s *EdgeStore) FindLiveEdgesBySubjectAndPredicate(ctx context.Context, subjectID uuid.UUID, predicate string) ([]*Edge, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT
@@ -260,6 +300,7 @@ func (s *EdgeStore) FindLiveEdgesBySubjectAndPredicate(ctx context.Context, subj
 			superseded_by, is_correction
 		FROM edges
 		WHERE subject_id = $1 AND predicate = $2 AND superseded_by IS NULL
+			AND source_type != '`+SourceTypeUserDeletion+`'
 	`, subjectID, predicate)
 	if err != nil {
 		return nil, err
@@ -318,6 +359,16 @@ func (s *EdgeStore) FindLiveEdgesBySubjectAndPredicate(ctx context.Context, subj
 // there a live edge with this exact object right now" — it does not,
 // and must not, reach into superseded edges at all; that's a decision
 // requiring the message timestamps this method has no access to.
+//
+// Also excludes tombstones (FindLiveEdgesBySubjectAndPredicate's own doc
+// comment has the full reasoning): a deletion marker is live by every
+// other criterion, but matching one here would "reinforce" a
+// zero-confidence tombstone instead of creating a fresh edge when the
+// user reasserts a fact they'd previously deleted — the same
+// stale-resurrection machinery (FindSupersededMatches/
+// isStaleResurrection) that decides whether a corrected-away value gets
+// relearned handles a deleted one too, once this method correctly stops
+// matching the tombstone itself.
 func (s *EdgeStore) FindMatchingEdge(ctx context.Context, subjectID uuid.UUID, predicate string, objectID *uuid.UUID, objectLiteral *string) (*Edge, error) {
 	candidates, err := s.FindLiveEdgesBySubjectAndPredicate(ctx, subjectID, predicate)
 	if err != nil {
