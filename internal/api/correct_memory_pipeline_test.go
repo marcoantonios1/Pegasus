@@ -318,6 +318,17 @@ func TestStoreExtractedTriples_ReplacesObjectMatchingNoneIsSkipped(t *testing.T)
 // requirement 10: no live edges at all for this subject+predicate
 // (including the case where the only edge is already superseded) —
 // skipped, not an error.
+//
+// Uses a uuid-suffixed, made-up predicate string rather than a real
+// vocabulary one like "has_birthday" — this suite's self entity is
+// SHARED across every test here (entities_single_self_idx: at most one
+// is_self=true row, ever, in this real, persistent, shared dev
+// database), so a real predicate name risks colliding with a live edge
+// another test (or an earlier run of THIS test) already left for the
+// same self entity, exactly the "zero candidates" precondition this
+// test needs to control. storeExtractedTriples itself never checks the
+// closed predicate vocabulary (that's ValidateTriples' job, upstream —
+// see parse.go), so this is a safe, isolated choice, not a cheat.
 func TestStoreExtractedTriples_ZeroLiveCandidatesIsSkipped(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
@@ -326,9 +337,10 @@ func TestStoreExtractedTriples_ZeroLiveCandidatesIsSkipped(t *testing.T) {
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
 	msg := createTestMessage(t, ctx, ts, uuid.New(), self.ID, "text", time.Now())
 
+	predicate := "zero_candidates_predicate_" + uuid.New().String()
 	idx := 0
 	triples := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "March", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx},
 	}
 
@@ -346,15 +358,18 @@ func TestStoreExtractedTriples_ZeroLiveCandidatesIsSkipped(t *testing.T) {
 // covers requirement 10's explicit second case: the only edge for this
 // subject+predicate exists but is already superseded — must behave
 // exactly like zero candidates, not find it via FindLiveEdgesBySubjectAndPredicate.
+// Uses a uuid-suffixed predicate for the same isolation reason as
+// TestStoreExtractedTriples_ZeroLiveCandidatesIsSkipped.
 func TestStoreExtractedTriples_ZeroLiveCandidatesWhenOnlyEdgeAlreadySuperseded(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
 
 	selfExternalID := "already-superseded-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	predicate := "already_superseded_predicate_" + uuid.New().String()
 
 	oldLit := "April"
-	oldEdge := &memory.Edge{SubjectID: self.ID, Predicate: "has_birthday", ObjectLiteral: &oldLit,
+	oldEdge := &memory.Edge{SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &oldLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0, DecayRate: memory.DecayRateStable}
 	if err := ts.edges.Create(ctx, oldEdge); err != nil {
 		t.Fatalf("create old edge: %v", err)
@@ -362,7 +377,7 @@ func TestStoreExtractedTriples_ZeroLiveCandidatesWhenOnlyEdgeAlreadySuperseded(t
 	// Supersede it directly, so the ONLY edge for this subject+predicate
 	// is already non-live.
 	if _, err := ts.edges.CorrectMemory(ctx, oldEdge.ID, memory.CorrectionInput{
-		SubjectID: self.ID, Predicate: "has_birthday", ObjectLiteral: strPtrLocal("March"),
+		SubjectID: self.ID, Predicate: predicate, ObjectLiteral: strPtrLocal("March"),
 	}); err != nil {
 		t.Fatalf("pre-supersede old edge: %v", err)
 	}
@@ -370,7 +385,7 @@ func TestStoreExtractedTriples_ZeroLiveCandidatesWhenOnlyEdgeAlreadySuperseded(t
 	msg := createTestMessage(t, ctx, ts, uuid.New(), self.ID, "text", time.Now())
 	idx := 0
 	triples := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "May", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "May", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: strPtrLocal("March")},
 	}
 
@@ -392,16 +407,20 @@ func strPtrLocal(s string) *string { return &s }
 
 // TestStoreExtractedTriples_LiveEdgeAlreadyHoldingValueIsReinforced
 // covers requirement 11: the live edge already holds the triple's new
-// value — reinforced, not duplicated, not superseded.
+// value — reinforced, not duplicated, not superseded. Uses a
+// uuid-suffixed predicate for the same isolation reason as the zero-
+// candidates tests above (so the exact-count assertion below is
+// meaningful against this test's OWN edge only).
 func TestStoreExtractedTriples_LiveEdgeAlreadyHoldingValueIsReinforced(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
 
 	selfExternalID := "already-correct-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	predicate := "already_correct_predicate_" + uuid.New().String()
 
 	existingLit := "March"
-	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
+	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &existingLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0, DecayRate: memory.DecayRateStable}
 	if err := ts.edges.Create(ctx, existingEdge); err != nil {
 		t.Fatalf("create existing edge: %v", err)
@@ -410,7 +429,7 @@ func TestStoreExtractedTriples_LiveEdgeAlreadyHoldingValueIsReinforced(t *testin
 	msg := createTestMessage(t, ctx, ts, uuid.New(), self.ID, "text", time.Now())
 	idx := 0
 	triples := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "March", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx}, // already-true "correction", no replaces_object needed
 	}
 
@@ -427,7 +446,7 @@ func TestStoreExtractedTriples_LiveEdgeAlreadyHoldingValueIsReinforced(t *testin
 	}
 
 	var rowCount int
-	if err := ts.pool.QueryRow(ctx, `SELECT count(*) FROM edges WHERE subject_id = $1 AND predicate = 'has_birthday'`, self.ID).Scan(&rowCount); err != nil {
+	if err := ts.pool.QueryRow(ctx, `SELECT count(*) FROM edges WHERE subject_id = $1 AND predicate = $2`, self.ID, predicate).Scan(&rowCount); err != nil {
 		t.Fatalf("count edges: %v", err)
 	}
 	if rowCount != 1 {
@@ -505,9 +524,16 @@ func TestStoreExtractedTriples_ConcurrentCorrectionRaceIsSkippedNotFatal(t *test
 
 	selfExternalID := "race-self-" + uuid.New().String()
 	self := resolveTestSelfEntity(t, ctx, ts, selfExternalID)
+	// uuid-suffixed, made-up predicate — same isolation reasoning as the
+	// other tests in this file: the self entity is shared across this
+	// whole suite, so a real predicate name risks a leftover live edge
+	// from another test interfering with this race's own exact-candidate
+	// setup (confirmed necessary: an earlier version of this test using
+	// "has_birthday" intermittently found a stray pre-existing match).
+	predicate := "race_predicate_" + uuid.New().String()
 
 	existingLit := "April"
-	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
+	existingEdge := &memory.Edge{SubjectID: self.ID, Predicate: predicate, ObjectLiteral: &existingLit,
 		Confidence: 0.8, Importance: 0.5, SourceType: memory.SourceTypeWhatsAppText, SourceWeight: 1.0, DecayRate: memory.DecayRateStable}
 	if err := ts.edges.Create(ctx, existingEdge); err != nil {
 		t.Fatalf("create existing edge: %v", err)
@@ -522,12 +548,12 @@ func TestStoreExtractedTriples_ConcurrentCorrectionRaceIsSkippedNotFatal(t *test
 	idx := 0
 	oldValue := "April"
 	triplesA := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "March", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 		{Subject: unrelatedSubjectA, Predicate: "likes", Object: "coffee", ObjectType: "literal", Confidence: 0.8},
 	}
 	triplesB := []extraction.ExtractedTriple{
-		{Subject: self.CanonicalName, Predicate: "has_birthday", Object: "May", ObjectType: "literal",
+		{Subject: self.CanonicalName, Predicate: predicate, Object: "May", ObjectType: "literal",
 			Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 		{Subject: unrelatedSubjectB, Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}
