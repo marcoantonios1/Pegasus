@@ -22,12 +22,20 @@ import (
 // outcomes deterministically without a live Costguard/model call.
 type fakeTriager struct {
 	candidate bool
+	// calls is additive — every existing fakeTriager use predates this
+	// field and doesn't read it (same pattern as fakeExtractor.calls) —
+	// added so the message-ingestion idempotency fix's tests can assert
+	// a resumed/duplicate import triggers ZERO new triage calls for
+	// already-processed messages/windows.
+	calls int
 }
 
 func (f *fakeTriager) IsCandidate(ctx context.Context, text string) (bool, error) {
+	f.calls++
 	return f.candidate, nil
 }
 func (f *fakeTriager) IsWindowCandidate(ctx context.Context, w extraction.Window) (bool, error) {
+	f.calls++
 	return f.candidate, nil
 }
 
