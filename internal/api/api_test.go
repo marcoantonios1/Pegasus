@@ -183,9 +183,16 @@ func createTestEmbedding(t *testing.T, ctx context.Context, ts *testStores, mess
 type fakeEmbedder struct {
 	vector []float32
 	err    error
+	// calls is additive — every existing fakeEmbedder use predates this
+	// field and doesn't read it (same pattern as fakeExtractor.calls) —
+	// added so the message-ingestion idempotency fix's tests can assert
+	// a resumed/duplicate import triggers ZERO new embedding calls for
+	// an already-processed message.
+	calls int
 }
 
 func (f *fakeEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
