@@ -195,7 +195,30 @@ const (
 // writes — the actual mechanism (not just a comment's claim) by which
 // both are guaranteed to produce the same shape of output for equivalent
 // content: there is exactly one place this happens, not two parallel
-// implementations that happen to agree.
+// implementations that happen to agree. Deliberately NOT special-cased
+// per caller for timestamps either (edge-timestamp fix, requirement 4):
+// Whatsmeow's history-sync can hand ProcessLiveMessage an old message
+// through the exact same "live" path ImportWhatsApp uses for historical
+// backlog, so both need identical observed-time handling, not "import
+// gets real dates, live gets now."
+//
+// Edge timestamps reflect when facts were actually SAID, not when this
+// function happens to run (the edge-timestamp fix this comment
+// documents): a new edge's FirstSeen/LastReinforced, and a reinforced
+// edge's (earliest, at) pair, are derived from the relevant source
+// messages' own messages.timestamp via resolveMessageTimestampRange /
+// correctionObservedAt — never from the `now` parameter directly. `now`
+// itself is kept, but ONLY as: (1) the clamp reference point
+// clampFutureTimestamp compares every resolved message timestamp against
+// (a misparsed future-dated .txt export timestamp clamps to now, logged,
+// rather than feeding a bogus future date into decay math), and (2) a
+// last-resort fallback on the rare path where sourceMessageIDs resolves
+// to zero actual messages (logged either way it's used) — both of which
+// genuinely mean "processing time," unlike the "when was this said" job
+// an edge's own timestamps do. Every other former direct use of `now`
+// (both Reinforce call sites, and new-edge creation) has been replaced
+// with a message-derived value; see this function's body for exactly
+// where.
 //
 // A triple with IsCorrection=true (and that passes the self-sender gate
 // below) is routed through EdgeStore.CorrectMemory instead of a normal
@@ -447,6 +470,13 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			SourceWeight:     memory.SourceWeights[sourceType],
 			SourceMessageIDs: sourceMessageIDs,
 			DecayRate:        memory.DefaultDecayRate(triple.Predicate),
+			// FirstSeen/LastReinforced: when this was actually SAID
+			// (windowEarliest/windowLatest, derived above from the
+			// source messages' own timestamps), not whenever this
+			// function happens to run — the edge-timestamp fix's whole
+			// point. A 2019 fact gets first_seen=2019, not today.
+			FirstSeen:      windowEarliest,
+			LastReinforced: windowLatest,
 		}
 		if err := a.edges.Create(ctx, edge); err != nil {
 			return outcomes, fmt.Errorf("create edge (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
