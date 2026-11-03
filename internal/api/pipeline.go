@@ -169,6 +169,22 @@ const (
 	// them" is discoverable and distinguishable from "there was nothing
 	// to correct at all," not silently folded into the same bucket.
 	TripleActionSkippedAmbiguousCorrectionTarget TripleAction = "skipped_ambiguous_correction_target"
+
+	// TripleActionSkippedStale is the stale-resurrection guard's own
+	// outcome (isStaleResurrection's doc comment has the full reasoning):
+	// a triple's exact object matches no LIVE edge, but matches one or
+	// more SUPERSEDED ones, and the incoming triple's own timestamp is no
+	// later than whatever superseded that dead edge. Rather than
+	// resurrecting a corrected-away (or dedup-merged) value as a fresh
+	// live edge, this triple is simply dropped — it carries no
+	// information newer than what's already been established. Distinct
+	// from both TripleActionSkippedNoCorrectionTarget and
+	// TripleActionSkippedAmbiguousCorrectionTarget: those two are about
+	// the IsCorrection=true path (nothing live to supersede); this one is
+	// about the ORDINARY, non-correction path (nothing live to reinforce,
+	// AND the only match is a dead edge this triple is too old to
+	// legitimately bring back).
+	TripleActionSkippedStale TripleAction = "skipped_stale"
 )
 
 // storeExtractedTriples resolves entities, applies source weighting,
@@ -196,6 +212,19 @@ const (
 // fabricating a "corrected" edge with nothing to supersede or silently
 // falling back to a normal Create, which would misrepresent an explicit
 // correction signal as an ordinary new fact.
+//
+// The NORMAL (non-correction) path has its own supersession-aware guard:
+// FindMatchingEdge only ever matches a LIVE edge now (previously it also
+// matched superseded ones, which accidentally — not deliberately —
+// stopped a corrected-away value from resurfacing, by reinforcing the
+// dead edge instead of creating a new one; see FindMatchingEdge's own doc
+// comment for why that was a real bug, not a safe simplification). With
+// that accidental protection gone, isStaleResurrection is what now
+// actually decides whether a no-live-match triple that happens to match a
+// SUPERSEDED edge is a stale, out-of-order replay (skip,
+// TripleActionSkippedStale) or a genuine fresh reassertion (let it
+// through to Create) — see its own doc comment for the full timestamp
+// comparison and its documented limits.
 //
 // Issue 32, for context on why this needed its own fix separate from the
 // self-sender gate below: the ORIGINAL correction path called
@@ -349,6 +378,25 @@ func (a *API) storeExtractedTriples(ctx context.Context, triples []extraction.Ex
 			continue
 		}
 
+		// No LIVE edge matches — but before treating this as a brand-new
+		// fact, check whether it's actually a stale, out-of-order replay
+		// of a value that's already been superseded (see
+		// isStaleResurrection's own doc comment for the full reasoning
+		// and FindMatchingEdge's for the bug this closes: FindMatchingEdge
+		// used to include superseded edges in ITS OWN match, which
+		// accidentally — not deliberately — prevented this exact
+		// resurrection by reinforcing the dead edge instead of creating a
+		// new one; it no longer does, so this check is what actually
+		// prevents it now).
+		stale, err := a.isStaleResurrection(ctx, subject.ID, triple.Predicate, objectID, objectLiteral, sourceMessageIDs, now)
+		if err != nil {
+			return outcomes, fmt.Errorf("check stale resurrection (subject=%q predicate=%q): %w", triple.Subject, triple.Predicate, err)
+		}
+		if stale {
+			outcomes = append(outcomes, TripleOutcome{Triple: triple, Action: TripleActionSkippedStale})
+			continue
+		}
+
 		confidence, err := memory.ApplySourceWeight(triple.Confidence, sourceType)
 		if err != nil {
 			return outcomes, fmt.Errorf("apply source weight (source_type=%q): %w", sourceType, err)
@@ -431,6 +479,155 @@ func (a *API) isCorrectionFromSelf(ctx context.Context, idx *int, sourceMessageI
 	}
 
 	return true, ""
+}
+
+// resolveLatestMessageTimestamp returns the latest Timestamp among the
+// messages in ids that still exist, and whether any did (false for an
+// empty/nil ids, or if none of them resolve). Shared by
+// isStaleResurrection for both sides of its comparison: the incoming
+// triple's own "when was this actually said" timestamp (from the
+// window's sourceMessageIDs) and a superseding edge's timestamp (from
+// its own SourceMessageIDs).
+func (a *API) resolveLatestMessageTimestamp(ctx context.Context, ids []uuid.UUID) (time.Time, bool, error) {
+	if len(ids) == 0 {
+		return time.Time{}, false, nil
+	}
+
+	msgs, err := a.messages.GetByIDs(ctx, ids)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if len(msgs) == 0 {
+		return time.Time{}, false, nil
+	}
+
+	latest := msgs[0].Timestamp
+	for _, m := range msgs[1:] {
+		if m.Timestamp.After(latest) {
+			latest = m.Timestamp
+		}
+	}
+	return latest, true, nil
+}
+
+// isStaleResurrection is the stale-resurrection guard: called only when
+// FindMatchingEdge found no LIVE edge matching this triple's exact
+// object. If that exact object matches one or more SUPERSEDED edges
+// (EdgeStore.FindSupersededMatches), decide whether the incoming triple
+// is a stale, out-of-order replay of a value that's already been
+// corrected (or dedup-merged) away — skip it, do not resurrect it as a
+// new live edge — or a genuine fresh reassertion of the same value after
+// whatever superseded it, in which case it's allowed through to the
+// normal Create path and becomes a brand-new live edge with a new ID
+// (deliberately NOT the dead edge coming back to life: a correction's
+// supersession is never undone by this).
+//
+// "Stale" vs. "fresh" is decided by comparing WHEN THINGS WERE SAID, not
+// write order: the incoming triple's timestamp is the latest timestamp
+// among sourceMessageIDs — the whole WINDOW's source messages, not a
+// single one; see the "known limits" note below — and each candidate's
+// comparison point is its own superseding edge's timestamp, computed the
+// same way from THAT edge's SourceMessageIDs, falling back to FirstSeen
+// (logged) only if none of its source messages still resolve. Using
+// message timestamps rather than edge write-time (an edge's own
+// FirstSeen, which can lag behind if processing order and real-world
+// order diverge — exactly the retried-transcription/re-import case this
+// guard exists for) is what actually generalizes across live,
+// historical-import, and retried-transcription code paths; now is only
+// ever used as a last-resort fallback when NO message timestamp resolves
+// at all (see below), never as the primary comparison value.
+//
+// Equal timestamps count as stale (<=, not <): a message processed again
+// at the exact instant it was originally said carries no new information
+// over whatever already superseded it.
+//
+// Several superseded matches can exist at once (a supersession chain, or
+// the Reflection Engine's dedup pass leaving more than one dead edge with
+// the same object text — see FindSupersededMatches' own doc comment). Any
+// one of them being at least as recent as the incoming triple is enough
+// to call the triple stale: this is deliberately the more conservative
+// reading when matches disagree, since wrongly resurrecting a corrected-
+// away fact is worse than skipping a genuinely fresh reassertion (the
+// same "skip over guess" judgment selectCorrectionTarget already makes
+// for the correction path).
+//
+// Known limits, deliberately not worked around (this issue's own scope
+// notes):
+//   - The incoming timestamp is per WINDOW, not per individual triple or
+//     message within it — every triple storeExtractedTriples processes in
+//     one call shares the same sourceMessageIDs, and therefore the same
+//     computed "incoming" timestamp. A window mixing a genuinely stale
+//     message and a genuinely fresh one about the same fact resolves as
+//     fresh for every triple drawn from it, since the window's own latest
+//     timestamp wins. Narrowing this to a per-triple timestamp would need
+//     extraction to report which message within the window produced each
+//     triple — out of this issue's scope.
+//   - superseded_by is overloaded: the Reflection Engine's dedup pass
+//     (reflection.MergeDuplicates, §9.2) also sets it, on a duplicate edge
+//     pointing at its surviving cluster-mate, for a reason that has
+//     nothing to do with the fact being wrong. A triple whose only
+//     superseded match is a dedup-merged duplicate will, if judged
+//     "fresh" by this comparison, create a brand-new live edge for a
+//     value the Reflection Engine already decided was the same fact as
+//     something else — which the next MergeDuplicates pass should simply
+//     re-merge, rather than this guard reinforcing the dead duplicate.
+//     Accepted, not built around.
+//   - General inferred-contradiction handling (§7.2: a new live edge that
+//     disagrees with a DIFFERENT live edge on the same subject+predicate —
+//     e.g. a fresh live "works at Acme" now coexisting with a live "works
+//     at Globex" a correction put in place) does not exist in this
+//     codebase yet (confirmed by reading correct_memory.go: CorrectMemory
+//     explicitly does only its own minimal supersession write, and notes
+//     §7.2's general mechanism as a separate, unbuilt concern). A "fresh"
+//     reassertion here is let through to Create as a normal new edge, and
+//     the two live edges simply coexist until that separate mechanism
+//     exists — this guard does not attempt to build it.
+func (a *API) isStaleResurrection(ctx context.Context, subjectID uuid.UUID, predicate string, objectID *uuid.UUID, objectLiteral *string, sourceMessageIDs []uuid.UUID, now time.Time) (bool, error) {
+	matches, err := a.edges.FindSupersededMatches(ctx, subjectID, predicate, objectID, objectLiteral)
+	if err != nil {
+		return false, fmt.Errorf("find superseded matches: %w", err)
+	}
+	if len(matches) == 0 {
+		return false, nil
+	}
+
+	incoming, ok, err := a.resolveLatestMessageTimestamp(ctx, sourceMessageIDs)
+	if err != nil {
+		return false, fmt.Errorf("resolve incoming message timestamp: %w", err)
+	}
+	if !ok {
+		// sourceMessageIDs are messages this very call just processed, so
+		// this shouldn't happen in practice — but fails safe toward the
+		// normal Create path (by comparing against "now," which nothing
+		// in the past can be later than) rather than silently discarding
+		// a triple over a timestamp this function couldn't establish.
+		incoming = now
+	}
+
+	for _, match := range matches {
+		superseding, err := a.edges.GetByID(ctx, *match.SupersededBy)
+		if err != nil {
+			return false, fmt.Errorf("load superseding edge %s (superseded match %s): %w", *match.SupersededBy, match.ID, err)
+		}
+
+		sTimestamp, ok, err := a.resolveLatestMessageTimestamp(ctx, superseding.SourceMessageIDs)
+		if err != nil {
+			return false, fmt.Errorf("resolve superseding edge %s's message timestamp: %w", superseding.ID, err)
+		}
+		if !ok {
+			sTimestamp = superseding.FirstSeen
+			a.logf("isStaleResurrection: superseding edge %s has no resolvable source messages, falling back to first_seen (%s)",
+				superseding.ID, superseding.FirstSeen)
+		}
+
+		if !incoming.After(sTimestamp) {
+			a.logf("isStaleResurrection: stale resurrection skipped (subject=%s predicate=%q) — dead edge %s (superseded by %s at %s) matches an incoming triple timestamped %s, which is not later",
+				subjectID, predicate, match.ID, superseding.ID, sTimestamp, incoming)
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // correctionSelection is selectCorrectionTarget's decision for one
