@@ -2,7 +2,7 @@ package reflection
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -111,26 +111,74 @@ func (c DedupConfig) withDefaults() DedupConfig {
 // deletion marker absorbing a real live edge's source_message_ids,
 // corrupting it, exactly backward from what a delete is supposed to do.
 //
+// is_correction and decay_locked edges are ALSO excluded before
+// clustering even starts (logged via log, nil-safe — this package's
+// Logger interface, trigger.go, has no separate debug level, so Info is
+// used for this low-severity, "why didn't X merge" line too). This is a
+// deliberate design choice, not the only one considered: the alternative
+// — letting a locked edge win as survivor when it matches an ordinary
+// duplicate — was rejected, because merging would append ordinary
+// messages' source_message_ids onto a correction's audit trail (the
+// exact history IsCorrection exists to keep clean), and fuzzy literal
+// similarity could fold a message that merely LOOKS similar but means
+// something different into a locked, maximally-trusted edge. The
+// consequence, accepted rather than worked around: a near-duplicate
+// ORDINARY edge can remain live right next to a locked one indefinitely
+// — it is never merged into the lock, and simply decays normally on its
+// own, like any other live edge the lock doesn't apply to.
+//
 // Merging is never deletion (EdgeStore.Delete is intentionally
 // unimplemented, edges are never hard-deleted). For each cluster of 2+
-// duplicate edges:
+// duplicate edges, EdgeStore.MergeDuplicateEdges (memory package) does
+// the actual write, as one transaction — see its own doc comment for the
+// full mechanism (lock everything, re-validate under the lock, narrow
+// writes only) and the three real bugs in the previous, non-transactional
+// implementation it fixes (last_reinforced could move backwards; no
+// protection for locked edges reaching the write path even if they slip
+// past the candidate filter above via a race; lost updates from
+// overwriting whole rows from a stale in-memory snapshot). This
+// function's own responsibilities are: deciding WHICH edges are even
+// candidates (the filtering above), WHICH ones cluster together
+// (clusterDuplicates), and WHO the survivor is:
 //   - The survivor is the edge with the earliest FirstSeen.
-//   - The survivor's SourceMessageIDs gains every other cluster member's
-//     SourceMessageIDs appended on, via Update() (Reinforce doesn't touch
-//     that field), and its LastReinforced is bumped via Reinforce() (not
-//     Update()) to the latest FirstSeen among the cluster — the point in
-//     time the fact was last independently reconfirmed. Update() is
-//     called before Reinforce() specifically so Reinforce's timestamp
-//     bump is the last write and can't be clobbered by Update() writing
-//     back the survivor's pre-merge (stale) LastReinforced.
 //   - The survivor keeps its own ObjectLiteral (the earliest phrasing) —
 //     duplicates' literals are not merged or combined into it. That's a
 //     deliberate scope limit: combining text isn't specified by the
 //     proposal, and inventing it risks losing information a future reader
 //     might want from the original edges (still reachable via
 //     SourceMessageIDs/SupersededBy).
-//   - Every other cluster member has its SupersededBy set to the
-//     survivor's ID via Update(); no other field on it is touched.
+//
+// Per-cluster atomicity, not per-pass: each cluster is merged in its OWN
+// transaction (MergeDuplicateEdges' own Begin/Commit), not one
+// transaction for the whole candidate set. If a cluster's merge returns
+// memory.ErrMergeConflict (its candidates no longer match reality by the
+// time the transaction ran — one became locked, got superseded, or
+// simply no longer exists), that ONE cluster is logged and skipped, and
+// the pass continues with the rest. Any OTHER error stops the pass
+// immediately and returns mergedCount as of the last successfully
+// committed cluster — those commits are already individually consistent
+// and don't need to be undone. Deliberately NOT one big transaction for
+// the whole pass: this pass is interruptible (the Reflection Engine's
+// idle trigger, trigger.go, cancels an in-flight pass the moment live
+// activity resumes), and holding locks across potentially thousands of
+// candidate edges for the whole pass's duration would contend far more
+// with concurrent live ingestion than letting already-merged clusters
+// simply stay merged while a later one fails or the pass gets cut short.
+//
+// mergedCount is the number of edges superseded as duplicates (i.e. the
+// sum of each successfully merged cluster's size minus one), not the
+// number of clusters.
+//
+// Mutates candidates' own *Edge values in place on a successful merge
+// (survivor.SourceMessageIDs/LastReinforced; each duplicate's
+// SupersededBy) — not a side effect to be surprised by, but required:
+// the (not yet built — see decay.go's own doc comment) consolidation
+// orchestrator is documented to pass this SAME candidate slice on to
+// ApplyBatchDecay afterward, which decides what to compute per edge by
+// checking SupersededBy on those same pointers. Mirrors the AUTHORITATIVE
+// post-merge values MergeDuplicateEdges itself computed under the lock,
+// not a separate recomputation in this package that could diverge from
+// what was actually written.
 //
 // NOTE on SupersededBy overload: this reuses the same supersession
 // mechanism §7.2's contradiction handling and CorrectMemory use, rather
@@ -141,17 +189,23 @@ func (c DedupConfig) withDefaults() DedupConfig {
 // an audit view), it would need something like IsCorrection=false plus a
 // new boolean flag — deliberately not built here, just flagged as a known
 // tradeoff rather than a silent one.
-//
-// mergedCount is the number of edges superseded as duplicates (i.e. the
-// sum of each cluster's size minus one), not the number of clusters.
-func MergeDuplicates(ctx context.Context, store *memory.EdgeStore, candidates []*memory.Edge, cfg DedupConfig) (mergedCount int, err error) {
+func MergeDuplicates(ctx context.Context, store *memory.EdgeStore, candidates []*memory.Edge, cfg DedupConfig, log Logger) (mergedCount int, err error) {
 	cfg = cfg.withDefaults()
 
 	live := make([]*memory.Edge, 0, len(candidates))
 	for _, e := range candidates {
-		if e.SupersededBy == nil && !memory.IsTombstone(*e) {
-			live = append(live, e)
+		if e.SupersededBy != nil || memory.IsTombstone(*e) {
+			continue
 		}
+		if e.IsCorrection || e.DecayLocked {
+			if log != nil {
+				log.Info("dedup.candidate_excluded_locked", map[string]any{
+					"edge_id": e.ID, "is_correction": e.IsCorrection, "decay_locked": e.DecayLocked,
+				})
+			}
+			continue
+		}
+		live = append(live, e)
 	}
 
 	for _, group := range groupBySubjectPredicate(live) {
@@ -160,9 +214,17 @@ func MergeDuplicates(ctx context.Context, store *memory.EdgeStore, candidates []
 				continue
 			}
 
-			n, err := mergeCluster(ctx, store, cluster)
-			if err != nil {
-				return mergedCount, err
+			n, mergeErr := mergeCluster(ctx, store, cluster)
+			if mergeErr != nil {
+				if errors.Is(mergeErr, memory.ErrMergeConflict) {
+					if log != nil {
+						log.Info("dedup.cluster_skipped_conflict", map[string]any{
+							"cluster_size": len(cluster), "survivor_id": cluster[0].ID,
+						})
+					}
+					continue
+				}
+				return mergedCount, mergeErr
 			}
 			mergedCount += n
 		}
@@ -354,42 +416,36 @@ func normalizedTokenSet(s string) map[string]bool {
 
 // mergeCluster collapses a single cluster (sorted by FirstSeen ascending,
 // per clusterDuplicates) onto cluster[0] as the survivor, and returns the
-// number of duplicate edges merged into it. See MergeDuplicates' doc
-// comment for the write ordering (Update before Reinforce) and why.
+// number of duplicate edges merged into it.
+//
+// The actual write is ONE call to EdgeStore.MergeDuplicateEdges — see its
+// own doc comment for the transaction/locking/re-validation it does.
+// This function's only remaining job on success is mirroring the
+// AUTHORITATIVE post-merge values it returns back onto THIS cluster's
+// own *Edge pointers (survivor and duplicates are the same objects the
+// caller's candidates slice holds — see MergeDuplicates' own doc comment
+// on why that mutation matters for whatever reads candidates
+// afterward), not recomputing anything independently in Go that could
+// diverge from what was actually committed under the lock.
 func mergeCluster(ctx context.Context, store *memory.EdgeStore, cluster []*memory.Edge) (int, error) {
 	survivor := cluster[0]
 	duplicates := cluster[1:]
+
+	dupIDs := make([]uuid.UUID, len(duplicates))
+	for i, dup := range duplicates {
+		dupIDs[i] = dup.ID
+	}
+
+	updatedSurvivor, err := store.MergeDuplicateEdges(ctx, survivor.ID, dupIDs)
+	if err != nil {
+		return 0, err
+	}
+
+	survivor.SourceMessageIDs = updatedSurvivor.SourceMessageIDs
+	survivor.LastReinforced = updatedSurvivor.LastReinforced
 	survivorID := survivor.ID
-
-	mergedMessageIDs := append([]uuid.UUID{}, survivor.SourceMessageIDs...)
-	latestConfirmation := survivor.FirstSeen
-	for _, dup := range duplicates {
-		mergedMessageIDs = append(mergedMessageIDs, dup.SourceMessageIDs...)
-		if dup.FirstSeen.After(latestConfirmation) {
-			latestConfirmation = dup.FirstSeen
-		}
-	}
-	survivor.SourceMessageIDs = mergedMessageIDs
-
-	if err := store.Update(ctx, survivor); err != nil {
-		return 0, fmt.Errorf("dedup: update survivor edge %s with merged source_message_ids: %w", survivor.ID, err)
-	}
-
-	// earliest = survivor.FirstSeen: clusterDuplicates already sorted the
-	// cluster ascending by FirstSeen, so the survivor (cluster[0]) already
-	// holds the earliest FirstSeen in the whole cluster — this LEAST is a
-	// deliberate no-op, not a second independent timestamp, matching
-	// Reinforce's new two-argument contract (edge-timestamp fix, Part 3).
-	if err := store.Reinforce(ctx, survivor.ID, latestConfirmation, survivor.FirstSeen); err != nil {
-		return 0, fmt.Errorf("dedup: reinforce survivor edge %s: %w", survivor.ID, err)
-	}
-	survivor.LastReinforced = latestConfirmation
-
 	for _, dup := range duplicates {
 		dup.SupersededBy = &survivorID
-		if err := store.Update(ctx, dup); err != nil {
-			return 0, fmt.Errorf("dedup: supersede duplicate edge %s: %w", dup.ID, err)
-		}
 	}
 
 	return len(duplicates), nil

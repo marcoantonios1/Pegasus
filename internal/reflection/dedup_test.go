@@ -109,6 +109,21 @@ func TestMergeDuplicates(t *testing.T) {
 		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
 		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
 	}, base.Add(2*time.Hour))
+	// exactA reinforced AFTER exactB's FirstSeen, deliberately — this is
+	// requirement 9's seed fix: createTestEdge leaves LastReinforced ==
+	// FirstSeen for every edge, so without this, the old (buggy)
+	// "latest FirstSeen among the cluster" computation and the fixed
+	// "latest LastReinforced among the cluster" computation happen to
+	// agree, and this test would pass either way — proving nothing about
+	// which one is actually implemented. Bumping exactA's LastReinforced
+	// past exactB's FirstSeen makes the two computations disagree: the
+	// old code would have moved it BACKWARD to exactB's FirstSeen; the
+	// fix must leave it at exactAReinforcedAt (already the max).
+	exactAReinforcedAt := base.Add(10 * time.Hour)
+	if err := edgeStore.Reinforce(ctx, exactA.ID, exactAReinforcedAt, exactA.FirstSeen); err != nil {
+		t.Fatalf("reinforce exactA: %v", err)
+	}
+	exactA.LastReinforced = exactAReinforcedAt
 
 	// --- Case 2: similar-but-not-identical literals within threshold -> must merge
 	similarA := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
@@ -197,7 +212,7 @@ func TestMergeDuplicates(t *testing.T) {
 		clusterA, clusterB, clusterC,
 	}
 
-	mergedCount, err := MergeDuplicates(ctx, edgeStore, candidates, DefaultDedupConfig())
+	mergedCount, err := MergeDuplicates(ctx, edgeStore, candidates, DefaultDedupConfig(), nil)
 	if err != nil {
 		t.Fatalf("MergeDuplicates: %v", err)
 	}
@@ -253,9 +268,16 @@ func TestMergeDuplicates(t *testing.T) {
 	// --- Survivor field assertions (requirements 10-12) ---
 
 	survivor := reloadEdge(t, ctx, edgeStore, exactA.ID)
-	// LastReinforced bumped to the latest FirstSeen among the cluster (exactB's).
-	if !survivor.LastReinforced.Equal(exactB.FirstSeen) {
-		t.Errorf("expected survivor last_reinforced = %v (latest duplicate's first_seen), got %v", exactB.FirstSeen, survivor.LastReinforced)
+	// LastReinforced is the MAX LastReinforced across the cluster — NOT
+	// the latest FirstSeen (the old, buggy behavior this fix replaces;
+	// see exactAReinforcedAt's own setup comment above for why the seed
+	// is deliberately built so these two would disagree if the old
+	// computation were still in place).
+	if !survivor.LastReinforced.Equal(exactAReinforcedAt) {
+		t.Errorf("expected survivor last_reinforced = %v (max last_reinforced across the cluster), got %v", exactAReinforcedAt, survivor.LastReinforced)
+	}
+	if survivor.LastReinforced.Before(exactAReinforcedAt) {
+		t.Error("expected last_reinforced to never move backward")
 	}
 	// SourceMessageIDs includes both original edges' message IDs.
 	wantIDs := map[uuid.UUID]bool{exactA.SourceMessageIDs[0]: true, exactB.SourceMessageIDs[0]: true}
@@ -347,7 +369,7 @@ func TestMergeDuplicates_ExcludesTombstone(t *testing.T) {
 		DecayRate: memory.DecayRateSlow,
 	}, base.Add(1*time.Hour))
 
-	mergedCount, err := MergeDuplicates(ctx, edgeStore, []*memory.Edge{tombstone, live}, DefaultDedupConfig())
+	mergedCount, err := MergeDuplicates(ctx, edgeStore, []*memory.Edge{tombstone, live}, DefaultDedupConfig(), nil)
 	if err != nil {
 		t.Fatalf("MergeDuplicates: %v", err)
 	}
@@ -365,5 +387,155 @@ func TestMergeDuplicates_ExcludesTombstone(t *testing.T) {
 	}
 	if len(reloadedTombstone.SourceMessageIDs) != 0 {
 		t.Errorf("expected the tombstone to never absorb the live edge's source_message_ids, got %v", reloadedTombstone.SourceMessageIDs)
+	}
+}
+
+// TestMergeDuplicates_ExcludesLockedEdgesBeforeClustering covers
+// requirement 10: a cluster containing an is_correction edge (and,
+// separately, a decay_locked-only edge) plus an ordinary near-duplicate
+// must merge NOTHING — the locked edge is excluded before clustering
+// even starts (MergeDuplicates' own candidate filter), so it never
+// becomes a survivor OR a duplicate. The ordinary edge, left with no one
+// to cluster with, simply stays live and unmerged.
+func TestMergeDuplicates_ExcludesLockedEdgesBeforeClustering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mod  func(e *memory.Edge)
+	}{
+		{"is_correction", func(e *memory.Edge) { e.IsCorrection = true; e.DecayLocked = true }},
+		{"decay_locked_only", func(e *memory.Edge) { e.DecayLocked = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testDB(t)
+			ctx := context.Background()
+			entityStore := memory.NewEntityStore(pool)
+			edgeStore := memory.NewEdgeStore(pool)
+
+			subject := createTestEntity(t, ctx, entityStore, "Dedup Locked Candidate Subject "+tc.name)
+			base := time.Now().Add(-72 * time.Hour)
+			litFn := func(s string) *string { return &s }
+
+			locked := &memory.Edge{
+				SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+				Confidence: 1.0, Importance: 0.9, SourceType: memory.SourceTypeUserCorrection, SourceWeight: 1.0,
+				DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+			}
+			tc.mod(locked)
+			locked = createTestEdge(t, ctx, pool, edgeStore, locked, base)
+
+			ordinary := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+				SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+				Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+				DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+			}, base.Add(1*time.Hour))
+
+			lockedOriginalSourceIDs := append([]uuid.UUID{}, locked.SourceMessageIDs...)
+
+			mergedCount, err := MergeDuplicates(ctx, edgeStore, []*memory.Edge{locked, ordinary}, DefaultDedupConfig(), nil)
+			if err != nil {
+				t.Fatalf("MergeDuplicates: %v", err)
+			}
+			if mergedCount != 0 {
+				t.Errorf("expected zero merges (the locked edge must never be a merge candidate), got %d", mergedCount)
+			}
+
+			reloadedLocked := reloadEdge(t, ctx, edgeStore, locked.ID)
+			if reloadedLocked.SupersededBy != nil {
+				t.Errorf("expected the locked edge's superseded_by to stay nil (never a duplicate), got %v", reloadedLocked.SupersededBy)
+			}
+			if reloadedLocked.Confidence != locked.Confidence {
+				t.Errorf("expected the locked edge's confidence untouched, got %v", reloadedLocked.Confidence)
+			}
+			if len(reloadedLocked.SourceMessageIDs) != len(lockedOriginalSourceIDs) {
+				t.Errorf("expected the locked edge's source_message_ids untouched, got %v", reloadedLocked.SourceMessageIDs)
+			}
+
+			// The real proof the locked edge was never chosen as
+			// survivor: if it had been, ordinary.SupersededBy would now
+			// point at it.
+			reloadedOrdinary := reloadEdge(t, ctx, edgeStore, ordinary.ID)
+			if reloadedOrdinary.SupersededBy != nil {
+				t.Errorf("expected the ordinary edge to remain live (not superseded by the locked edge), got superseded_by=%v", reloadedOrdinary.SupersededBy)
+			}
+		})
+	}
+}
+
+// TestMergeDuplicates_FailingClusterDoesNotUndoCommittedClusters covers
+// requirement 13: two independent clusters, one that merges
+// successfully and one engineered to hit memory.ErrMergeConflict (a
+// race — one of its edges becomes is_correction=true, directly in the
+// DB, AFTER the in-memory candidates slice was already built, so
+// MergeDuplicates' own pre-clustering filter — which only sees the
+// STALE Go struct — can't catch it; MergeDuplicateEdges' re-validation
+// under the lock does). The failing cluster must be skipped without
+// undoing the other cluster's already-committed merge, and mergedCount
+// must reflect only the successful one.
+func TestMergeDuplicates_FailingClusterDoesNotUndoCommittedClusters(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+
+	base := time.Now().Add(-72 * time.Hour)
+	litFn := func(s string) *string { return &s }
+
+	subjectA := createTestEntity(t, ctx, entityStore, "Dedup Partial Failure Subject A")
+	edgeA1 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subjectA.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base)
+	edgeA2 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subjectA.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base.Add(1*time.Hour))
+
+	subjectB := createTestEntity(t, ctx, entityStore, "Dedup Partial Failure Subject B")
+	edgeB1 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subjectB.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base)
+	edgeB2 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subjectB.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base.Add(1*time.Hour))
+
+	// Candidates slice built BEFORE the race — matches a real
+	// orchestrator loading a snapshot, then another process (live
+	// ingestion issuing a correction) mutating the DB before the dedup
+	// pass's own transaction runs.
+	candidates := []*memory.Edge{edgeA1, edgeA2, edgeB1, edgeB2}
+
+	if _, err := pool.Exec(ctx, `UPDATE edges SET is_correction = true, decay_locked = true WHERE id = $1`, edgeB2.ID); err != nil {
+		t.Fatalf("simulate concurrent correction on edgeB2: %v", err)
+	}
+
+	mergedCount, err := MergeDuplicates(ctx, edgeStore, candidates, DefaultDedupConfig(), nil)
+	if err != nil {
+		t.Fatalf("MergeDuplicates: %v", err)
+	}
+	if mergedCount != 1 {
+		t.Errorf("expected mergedCount = 1 (only cluster A), got %d", mergedCount)
+	}
+
+	reloadedA2 := reloadEdge(t, ctx, edgeStore, edgeA2.ID)
+	if reloadedA2.SupersededBy == nil || *reloadedA2.SupersededBy != edgeA1.ID {
+		t.Errorf("expected cluster A's merge committed (edgeA2 superseded by edgeA1), got superseded_by=%v", reloadedA2.SupersededBy)
+	}
+
+	reloadedB1 := reloadEdge(t, ctx, edgeStore, edgeB1.ID)
+	if reloadedB1.SupersededBy != nil {
+		t.Errorf("expected cluster B's survivor untouched, got superseded_by=%v", reloadedB1.SupersededBy)
+	}
+	reloadedB2 := reloadEdge(t, ctx, edgeStore, edgeB2.ID)
+	if reloadedB2.SupersededBy != nil {
+		t.Errorf("expected cluster B's (now-correction) edge untouched beyond what was set directly, got superseded_by=%v", reloadedB2.SupersededBy)
+	}
+	if !reloadedB2.IsCorrection {
+		t.Error("expected edgeB2 to still be is_correction (set directly, never reverted)")
 	}
 }
