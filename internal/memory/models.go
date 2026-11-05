@@ -52,6 +52,20 @@ type Message struct {
 	MediaRef             *string   // see Pegasus proposal §6.2 — nullable
 	Processed            bool      // see Pegasus proposal §6.2
 	Timestamp            time.Time // see Pegasus proposal §6.2
+
+	// ExternalID is NOT in proposal §6.2 — added by the message-ingestion
+	// idempotency fix. It's each adapter's own deterministic identifier
+	// for this message (ingestion.RawMessage.ExternalID: a synthetic hash
+	// of conversation+sender+timestamp+body for export adapters, or the
+	// native platform message ID for the live WhatsApp adapter), carried
+	// through to storage so MessageStore.CreateIfAbsent can detect "this
+	// exact message was already stored" (via the partial unique index on
+	// (conversation_id, external_id), migration 000007) instead of
+	// silently creating a duplicate row on every re-import/redelivery.
+	// nil when an adapter had no real ID to give (an empty
+	// RawMessage.ExternalID) — stored with no dedup key, never a reason
+	// to drop the message.
+	ExternalID *string
 }
 
 // Embedding is a nomic-embed-text vector for a message, used for semantic

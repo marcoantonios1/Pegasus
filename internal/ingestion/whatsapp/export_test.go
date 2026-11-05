@@ -123,6 +123,47 @@ func TestParseExport_ExternalIDsAreStableAndUnique(t *testing.T) {
 	}
 }
 
+// TestParseExport_CollidingMessagesGetDistinctIDs covers the message-
+// ingestion idempotency fix's requirement 12 (adapter half): two
+// genuinely distinct messages that happen to share every input
+// syntheticExternalID hashes over (same conversation, same sender, same
+// displayed minute, identical body) must still end up with distinct
+// IDs — same-minute granularity plus identical content ("ok" twice) is
+// exactly the collision disambiguateExternalIDs exists for.
+func TestParseExport_CollidingMessagesGetDistinctIDs(t *testing.T) {
+	export := "1/1/26, 9:00 AM - Marco: ok\n1/1/26, 9:00 AM - Marco: ok\n"
+	msgs, err := NewExportParser().Parse(strings.NewReader(export), "conv-collide")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ExternalID == msgs[1].ExternalID {
+		t.Fatalf("expected distinct external IDs for colliding messages, both got %q", msgs[0].ExternalID)
+	}
+
+	// Golden-value pin (requirement 5): the FIRST occurrence's ID must be
+	// EXACTLY what syntheticExternalID itself computes — disambiguation
+	// must never touch it, so an already-unique message's ID stays
+	// stable across any future change to how collisions are handled.
+	ts, err := parseExportTimestamp("1/1/26", "9:00 AM")
+	if err != nil {
+		t.Fatalf("parseExportTimestamp: %v", err)
+	}
+	wantFirst := syntheticExternalID("conv-collide", "Marco", ts, "ok")
+	if msgs[0].ExternalID != wantFirst {
+		t.Errorf("expected the first occurrence's ID to be untouched by disambiguation: got %q, want %q", msgs[0].ExternalID, wantFirst)
+	}
+
+	// The second occurrence gets a deterministic ordinal-derived ID, not
+	// an arbitrary/random one.
+	wantSecond := ordinalExternalID(wantFirst, 2)
+	if msgs[1].ExternalID != wantSecond {
+		t.Errorf("expected the second occurrence's ID to be the deterministic ordinal derivation: got %q, want %q", msgs[1].ExternalID, wantSecond)
+	}
+}
+
 func TestParseExport_AndroidStyleHeader(t *testing.T) {
 	const androidSample = `05/01/2026, 9:01 AM - Marco: good morning
 05/01/2026, 9:02 AM - Alice: morning!

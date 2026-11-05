@@ -206,7 +206,12 @@ func TestImportWhatsApp_MixedTextAndVoiceWindow_UsesVoiceTranscriptSourceType(t 
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "BulkMixedConv.txt")
+	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
+	// comment on the same pattern: conversation_id derives from the
+	// filename, and a fixed name would let message-ingestion idempotency
+	// recognize this run's messages as already-processed leftovers from
+	// an earlier run of this same test.
+	exportPath := filepath.Join(dir, "BulkMixedConv-"+uuid.New().String()+".txt")
 
 	voiceFilename := "mixed-note.opus"
 	if err := os.WriteFile(filepath.Join(dir, voiceFilename), []byte("audio"), 0o644); err != nil {
@@ -445,7 +450,9 @@ func TestImportWhatsApp_VoiceMessagesTranscribedAndWindowed(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "BulkVoiceConv.txt")
+	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
+	// comment on the same pattern.
+	exportPath := filepath.Join(dir, "BulkVoiceConv-"+uuid.New().String()+".txt")
 
 	var export string
 	for i := 0; i < windowSize; i++ {
@@ -511,7 +518,9 @@ func TestImportWhatsApp_VoiceTranscriptionFailure_ContinuesRestOfImport(t *testi
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "OneBadVoice.txt")
+	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
+	// comment on the same pattern.
+	exportPath := filepath.Join(dir, "OneBadVoice-"+uuid.New().String()+".txt")
 	// No sibling audio file written on disk at all — the AudioFetcher
 	// itself will fail to read it, which is a valid (and simpler) way to
 	// force transcribeAndStore's fetch-failure path without needing the

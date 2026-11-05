@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
 )
@@ -131,6 +132,43 @@ func TestParseExport_ExternalIDsAreStableAndUnique(t *testing.T) {
 		if msgs[i].ExternalID != msgs2[i].ExternalID {
 			t.Errorf("external id not stable across reparse: %v vs %v", msgs[i].ExternalID, msgs2[i].ExternalID)
 		}
+	}
+}
+
+// TestParseExport_CollidingMessagesGetDistinctIDs mirrors
+// whatsapp/export_test.go's own version exactly (message-ingestion
+// idempotency fix, requirement 12's adapter half): two distinct messages
+// that happen to share every input syntheticExternalID hashes over
+// (conversation, sender, millisecond timestamp, content) must still end
+// up with distinct IDs, with the first occurrence's ID pinned unchanged.
+func TestParseExport_CollidingMessagesGetDistinctIDs(t *testing.T) {
+	export := `{
+		"thread_path": "inbox/collide_test",
+		"messages": [
+			{"sender_name": "kevin.azzi", "timestamp_ms": 1735707600000, "content": "ok"},
+			{"sender_name": "kevin.azzi", "timestamp_ms": 1735707600000, "content": "ok"}
+		]
+	}`
+	msgs, err := NewExportParser().Parse(strings.NewReader(export))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ExternalID == msgs[1].ExternalID {
+		t.Fatalf("expected distinct external IDs for colliding messages, both got %q", msgs[0].ExternalID)
+	}
+
+	ts := time.UnixMilli(1735707600000).UTC()
+	wantFirst := syntheticExternalID("inbox/collide_test", "kevin.azzi", ts, "ok")
+	if msgs[0].ExternalID != wantFirst {
+		t.Errorf("expected the first occurrence's ID to be untouched by disambiguation: got %q, want %q", msgs[0].ExternalID, wantFirst)
+	}
+
+	wantSecond := ordinalExternalID(wantFirst, 2)
+	if msgs[1].ExternalID != wantSecond {
+		t.Errorf("expected the second occurrence's ID to be the deterministic ordinal derivation: got %q, want %q", msgs[1].ExternalID, wantSecond)
 	}
 }
 

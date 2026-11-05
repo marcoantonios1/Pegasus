@@ -73,6 +73,23 @@ func (a *API) resolveSender(ctx context.Context, senderExternalID string) (*memo
 	return a.resolveEntity(ctx, senderExternalID, "person")
 }
 
+// messageExternalID converts a RawMessage's own ExternalID (each
+// adapter's deterministic identifier — see memory.Message.ExternalID's
+// own doc comment) into the pointer MessageStore.CreateIfAbsent needs as
+// its dedup key. A genuinely empty ExternalID becomes nil — no dedup for
+// this message, not a reason to drop it (requirement 4 of the message-
+// ingestion idempotency fix) — logged as a warning so a gap in some
+// future adapter that forgets to set ExternalID is discoverable rather
+// than silently degrading every one of its messages to "never
+// deduplicated."
+func (a *API) messageExternalID(externalID string) *string {
+	if externalID == "" {
+		a.logf("messageExternalID: RawMessage has an empty ExternalID — storing with external_id=NULL (no dedup for this message)")
+		return nil
+	}
+	return &externalID
+}
+
 // resolveEntity finds an existing entity by canonical_name, or creates a
 // new one with entityType if none exists. Exact (case-insensitive) name
 // matching only — no fuzzy/alias resolution ("Sara" vs "Sarah" vs a

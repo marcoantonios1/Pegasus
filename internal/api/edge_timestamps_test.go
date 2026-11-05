@@ -71,7 +71,14 @@ func TestImportWhatsApp_EdgeTimestampReflectsMessageDate(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	exportPath := filepath.Join(dir, "Historical2019.txt")
+	// Uuid-suffixed, not a fixed name: conversation_id derives from the
+	// filename, and this suite runs against a real, persistent, shared
+	// dev database — a fixed name would let message-ingestion
+	// idempotency (CreateIfAbsent, added after this test was written)
+	// recognize this run's messages as already-processed leftovers from
+	// an earlier run of this same test, silently skipping
+	// windowing/extraction entirely.
+	exportPath := filepath.Join(dir, "Historical2019-"+uuid.New().String()+".txt")
 	lines := make([]string, extraction.DefaultHistoricalWindowSize)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("message %d", i)
@@ -131,7 +138,7 @@ func TestGetRelationshipHistory_ChronologicalOrderWithRealDates(t *testing.T) {
 		Triager: triager, Extractor: extractor2019,
 	})
 	dir := t.TempDir()
-	path2019 := filepath.Join(dir, "Timeline2019.txt")
+	path2019 := filepath.Join(dir, "Timeline2019-"+uuid.New().String()+".txt")
 	lines := make([]string, extraction.DefaultHistoricalWindowSize)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("message %d", i)
@@ -149,7 +156,7 @@ func TestGetRelationshipHistory_ChronologicalOrderWithRealDates(t *testing.T) {
 	a2023 := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor2023,
 	})
-	path2023 := filepath.Join(dir, "Timeline2023.txt")
+	path2023 := filepath.Join(dir, "Timeline2023-"+uuid.New().String()+".txt")
 	writeExportFile(t, path2023, "John", "14/3/23", lines)
 	if _, err := a2023.ImportWhatsApp(ctx, path2023); err != nil {
 		t.Fatalf("ImportWhatsApp (2023): %v", err)
@@ -203,7 +210,7 @@ func TestGetRelevantContext_SinceFilterUsesFirstSeen(t *testing.T) {
 	for i := range lines {
 		lines[i] = fmt.Sprintf("message %d", i)
 	}
-	path2019 := filepath.Join(dir, "SinceFilter2019.txt")
+	path2019 := filepath.Join(dir, "SinceFilter2019-"+uuid.New().String()+".txt")
 	writeExportFile(t, path2019, "John", "14/3/19", lines)
 	if _, err := a.ImportWhatsApp(ctx, path2019); err != nil {
 		t.Fatalf("ImportWhatsApp (2019): %v", err)
@@ -216,7 +223,7 @@ func TestGetRelevantContext_SinceFilterUsesFirstSeen(t *testing.T) {
 		Triager: triager, Extractor: extractorRecent,
 	})
 	recentYear := time.Now().Year() - 1
-	pathRecent := filepath.Join(dir, "SinceFilterRecent.txt")
+	pathRecent := filepath.Join(dir, "SinceFilterRecent-"+uuid.New().String()+".txt")
 	writeExportFile(t, pathRecent, "John", fmt.Sprintf("14/3/%02d", recentYear%100), lines)
 	if _, err := aRecent.ImportWhatsApp(ctx, pathRecent); err != nil {
 		t.Fatalf("ImportWhatsApp (recent): %v", err)

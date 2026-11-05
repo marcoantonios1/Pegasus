@@ -19,10 +19,28 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/reportpath"
 )
 
+// productionDBName is the database name docker-compose.yml's real
+// Pegasus Postgres service actually uses (POSTGRES_DB: pegasus) — the
+// one name this tool refuses to run a real dry-run import against
+// without an explicit --confirm-real-db (see runRun's own safety check
+// below). This is a real incident class, not a hypothetical: this tool
+// has, in practice, been pointed at the real "pegasus" database by a
+// default flag value, polluting it with dry-run data that then needed a
+// manual discard-and-reimport cleanup (see the edge-timestamp fix's own
+// PR notes) — the actual motivation for this guard existing at all.
+const productionDBName = "pegasus"
+
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	exportPath := fs.String("export", "", "path to one real WhatsApp export .txt file — Marco's real data, not synthesized (see requirement 1)")
-	pegasusDSN := fs.String("pegasus-db", envOr("PEGASUS_DATABASE_URL", "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"), "Pegasus Postgres DSN")
+	// Deliberately NO default value (previously defaulted to the real
+	// Pegasus DSN, which is exactly the footgun this flag's own
+	// production-name check below exists to catch): --pegasus-db or
+	// PEGASUS_DATABASE_URL is now required, forcing whoever runs this to
+	// consciously name a target rather than silently inheriting whatever
+	// "the default Postgres" happens to be on this machine.
+	pegasusDSN := fs.String("pegasus-db", envOr("PEGASUS_DATABASE_URL", ""), "Pegasus Postgres DSN (required — no default)")
+	confirmRealDB := fs.Bool("confirm-real-db", false, "required in addition to --pegasus-db when the target database name matches productionDBName — explicit opt-in to running a real dry-run import against real production data")
 	costguardURL := fs.String("costguard-url", envOr("COSTGUARD_URL", "http://localhost:8080"), "Costguard base URL")
 	costguardDSN := fs.String("costguard-db", envOr("COSTGUARD_DATABASE_URL", "postgres://costguard:costguard@localhost:5432/costguard?sslmode=disable"), "Costguard's own Postgres DSN (for usage_records — see NOTES.md for why this isn't fetched over HTTP)")
 	agent := fs.String("agent", "pegasus", "Costguard X-Costguard-Agent tag this run's requests carry, and the usage_records.agent filter")
@@ -32,6 +50,9 @@ func runRun(args []string) error {
 	}
 	if *exportPath == "" || *out == "" {
 		return fmt.Errorf("--export and --out are required")
+	}
+	if *pegasusDSN == "" {
+		return fmt.Errorf("--pegasus-db (or PEGASUS_DATABASE_URL) is required — this tool no longer defaults to a database, to avoid accidentally running a real dry-run import against whichever Postgres happens to be reachable on the default connection")
 	}
 	if err := reportpath.EnsureOutsideRepo(*out); err != nil {
 		return err
@@ -43,6 +64,24 @@ func runRun(args []string) error {
 	if err != nil {
 		return fmt.Errorf("parse --pegasus-db: %w", err)
 	}
+
+	// Redacted target: host + port + database name, deliberately never
+	// the credentials embedded in the DSN — printed before anything else
+	// touches the database, so a wrong target is visible immediately
+	// rather than discovered after the fact in whatever database got
+	// written to.
+	targetHost := pegasusCfg.ConnConfig.Host
+	if pegasusCfg.ConnConfig.Port != 0 {
+		targetHost = fmt.Sprintf("%s:%d", targetHost, pegasusCfg.ConnConfig.Port)
+	}
+	targetDB := pegasusCfg.ConnConfig.Database
+	fmt.Printf("target Pegasus database: %s/%s\n", targetHost, targetDB)
+
+	if targetDB == productionDBName && !*confirmRealDB {
+		return fmt.Errorf("refusing to run against database %q (matches the configured production DB name %q) without --confirm-real-db — point --pegasus-db at a separate test database, or pass --confirm-real-db if you genuinely mean to run this dry-run tool against real production data",
+			targetDB, productionDBName)
+	}
+
 	pegasusCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		return pgxvec.RegisterTypes(ctx, conn)
 	}

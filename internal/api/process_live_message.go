@@ -156,9 +156,31 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		MediaRef:       rawMsg.MediaURL,
 		Processed:      false,
 		Timestamp:      rawMsg.Timestamp,
+		ExternalID:     a.messageExternalID(rawMsg.ExternalID),
 	}
-	if err := a.messages.Create(ctx, msg); err != nil {
+	created, err := a.messages.CreateIfAbsent(ctx, msg)
+	if err != nil {
 		return fmt.Errorf("ProcessLiveMessage: store message: %w", err)
+	}
+	if !created {
+		// An existing row AT ALL (processed or not) is a no-op here —
+		// requirement 7, and deliberately different from ImportWhatsApp's
+		// resumability (6b): Whatsmeow redelivering the same native
+		// message ID is the real-world case this guards, and the
+		// in-memory live window (a.liveWindows) — not the database — owns
+		// whichever unprocessed messages are currently pending for this
+		// conversation. Re-adding this message to that window would
+		// duplicate it there even though the ROW itself was never
+		// duplicated.
+		//
+		// Known, documented limitation this leaves in place (not fixed
+		// here): a live message that was stored but crashed before ever
+		// reaching its window is never picked back up by the live path
+		// itself on the next redelivery — only a historical re-import
+		// (ImportWhatsApp, which IS resumable) would recover it. Real,
+		// narrow, and out of this issue's stated scope (see its own "out
+		// of scope" list on live/export reconciliation).
+		return nil
 	}
 
 	// Storage succeeded: live activity genuinely happened, regardless of
