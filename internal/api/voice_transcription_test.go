@@ -11,6 +11,54 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
+// TestTranscribeVoiceMessage_ContextCancellationDoesNotEscalate covers
+// the Transcribe-retry-backoff-ignores-ctx fix's own caller-side half
+// (requirement 4): if the local leg's ctx is cancelled (or times out)
+// mid-transcription, that must be treated as "the caller gave up," not
+// as a transcription failure — escalating to OpenAI on an already-dead
+// ctx would just be a second doomed call, and the misleading "both
+// local and escalated transcription failed" log would suggest
+// Costguard/Speaches is broken when it isn't. Confirmed via a fake
+// Transcriber returning a context.Canceled-wrapped error (the exact
+// shape extraction.CostguardClient.Transcribe's own ctx-aware backoff
+// wait now returns): escalation must never be attempted.
+func TestTranscribeVoiceMessage_ContextCancellationDoesNotEscalate(t *testing.T) {
+	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
+		{err: fmt.Errorf("transcribe (waiting to retry after 502): %w", context.Canceled)},
+	}}
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, ok := a.transcribeVoiceMessage(ctx, uuid.New(), []byte("audio"), "note.ogg")
+	if ok {
+		t.Fatal("expected ok=false when the local leg is cancelled")
+	}
+	if len(transcriber.calls) != 1 {
+		t.Errorf("expected exactly 1 Transcribe call (no escalation attempted on cancellation), got %d", len(transcriber.calls))
+	}
+}
+
+// TestTranscribeVoiceMessage_DeadlineExceededDoesNotEscalate is the
+// context.DeadlineExceeded counterpart of the cancellation test above —
+// the same abort-cleanly behavior must apply to a timeout, not just an
+// explicit Cancel.
+func TestTranscribeVoiceMessage_DeadlineExceededDoesNotEscalate(t *testing.T) {
+	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
+		{err: fmt.Errorf("transcribe (waiting to retry after 502): %w", context.DeadlineExceeded)},
+	}}
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
+
+	_, _, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.ogg")
+	if ok {
+		t.Fatal("expected ok=false when the local leg times out")
+	}
+	if len(transcriber.calls) != 1 {
+		t.Errorf("expected exactly 1 Transcribe call (no escalation attempted on timeout), got %d", len(transcriber.calls))
+	}
+}
+
 // fakeTranscriber returns queued responses in call order — one entry per
 // expected Transcribe call (local leg, then escalation leg if triggered).
 // Records every call's opts so tests can assert what was actually passed

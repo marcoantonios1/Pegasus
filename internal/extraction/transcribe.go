@@ -191,6 +191,7 @@ const transcriptionTimeout = 5 * time.Minute
 //     field, not by sniffing the extension, so the container format
 //     reaching this method is whatever Instagram's export produced —
 //     confirmed already-safe here, not just assumed.
+//
 //   - Retry-on-502, below: the local Speaches instance unloads its model
 //     after 300s idle, and the first request after idle-unload doesn't
 //     just reload the model — the whole container process restarts, and
@@ -198,7 +199,13 @@ const transcriptionTimeout = 5 * time.Minute
 //     A single retry a few seconds later succeeded both times. This is
 //     NOT escalation-worthy — it's an operational retry, distinguished
 //     from a genuine failure purely by status code (502, exactly once),
-//     not by guessing at error text.
+//     not by guessing at error text. The wait before that retry respects
+//     ctx: a cancelled/timed-out ctx returns immediately (wrapping
+//     ctx.Err(), so errors.Is(err, context.Canceled) /
+//     context.DeadlineExceeded still works for the caller) rather than
+//     blocking for the full backoff and then sending the retry request
+//     anyway — a caller that already gave up waiting for this message
+//     should never still cause a late, unwanted retry call.
 //
 // Escalation (§5's confidence trigger, plus the spot-check's own
 // Arabic-specific finding — see internal/api's shouldEscalateTranscription)
@@ -215,7 +222,30 @@ func (c *CostguardClient) Transcribe(ctx context.Context, audio []byte, filename
 
 	var statusErr *TranscriptionStatusError
 	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusBadGateway {
-		time.Sleep(c.transcriptionRetryBackoff())
+		// time.NewTimer + explicit Stop, not time.After: a bare time.After
+		// leaks its underlying timer running in the background for the
+		// full backoff (default 30s, see DefaultTranscriptionRetryBackoff)
+		// whenever ctx.Done() fires first — harmless for one call, but
+		// this retry path runs once per voice message transcribed, so a
+		// busy import leaking one abandoned timer per cancelled/timed-out
+		// message is real, avoidable waste.
+		//
+		// ctx winning this select must return BEFORE the retry request is
+		// ever sent — a cancelled/timed-out ctx blocking for the full
+		// backoff and then still issuing the retry anyway was the bug
+		// this fix closes. The returned error wraps ctx.Err() with %w so
+		// errors.Is(err, context.Canceled) / context.DeadlineExceeded
+		// still works for callers through this wrapping (transcribeOnce's
+		// own errors already rely on the same guarantee via its "call
+		// costguard: %w" wrap).
+		timer := time.NewTimer(c.transcriptionRetryBackoff())
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("transcribe (waiting to retry after 502): %w", ctx.Err())
+		}
+
 		resp, retryErr := c.transcribeOnce(ctx, audio, filename, opts)
 		if retryErr != nil {
 			return nil, fmt.Errorf("transcribe (after 502 retry): %w", retryErr)

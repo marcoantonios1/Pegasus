@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/google/uuid"
@@ -170,10 +171,30 @@ func shouldEscalateTranscription(resp *extraction.TranscriptionResponse, cfg Tra
 // transcript — a real transcript at lower confidence is still more
 // useful than losing the message from the graph entirely, and this is
 // NOT the "both attempts fail" case requirement 6 describes.
+//
+// Exception to all of the above: ctx being cancelled or timing out is
+// NOT a transcription failure at all — it's the caller giving up on this
+// message, and the local leg's own Transcribe call already stopped
+// cooperatively as soon as that happened (see extraction.CostguardClient.
+// Transcribe's own 502-retry-wait fix). Escalating to OpenAI on a
+// cancelled ctx would just issue a second doomed call for no reason, and
+// logging it alongside genuine failures ("both local and escalated
+// transcription failed") would misleadingly suggest Costguard/Speaches
+// is broken when the real cause is simply that nothing is waiting for
+// this result anymore. Detected via errors.Is, which works through
+// Transcribe's %w-wrapped ctx.Err() (and, for an in-flight HTTP request
+// cancelled mid-call, through net/url.Error's own Unwrap) — abort
+// immediately, leaving msg unprocessed for a later recovery pass
+// (api.RecoverUnprocessedLive) to retry once something is actually
+// waiting on it again.
 func (a *API) transcribeVoiceMessage(ctx context.Context, msgID uuid.UUID, audio []byte, filename string) (text string, confidence float64, ok bool) {
 	cfg := a.transcriptionConfig.withDefaults()
 
 	localResp, localErr := a.transcriber.Transcribe(ctx, audio, filename, extraction.TranscribeOptions{})
+	if localErr != nil && (errors.Is(localErr, context.Canceled) || errors.Is(localErr, context.DeadlineExceeded)) {
+		a.logf("transcribeVoiceMessage: aborted for message %s (%v) — leaving unprocessed for later recovery, not escalating", msgID, localErr)
+		return "", 0, false
+	}
 
 	var needsEscalation bool
 	var detectedLang string
