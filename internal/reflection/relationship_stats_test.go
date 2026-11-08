@@ -17,36 +17,161 @@ func floatsClose(a, b, epsilon float64) bool {
 
 // --- Requirement 7: unit tests for each formula component in isolation ---
 
+// TestComputeFrequency covers rule F's reworked formula: 1:1 attribution
+// (rule B, unchanged), group attribution (rule C: own messages only,
+// scaled by groupActivityWeight, Marco never credited), and the
+// cross-contact mean now being computed per CONTACT rather than per
+// CONVERSATION.
 func TestComputeFrequency(t *testing.T) {
-	closeConv := uuid.New()
-	moderateConv := uuid.New()
-	distantConv := uuid.New() // never appears in windowCounts: zero activity this window
+	self := uuid.New()
 
-	windowCounts := map[uuid.UUID]int{
-		closeConv:    40,
-		moderateConv: 8,
+	t.Run("1:1 only — above/below-average contacts, zero activity, empty population", func(t *testing.T) {
+		closeContact := uuid.New()
+		moderateContact := uuid.New()
+		distantContact := uuid.New() // never appears in perConvSenderCounts: zero activity this window
+		closeConv := uuid.New()
+		moderateConv := uuid.New()
+
+		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
+			closeConv:    {self: 20, closeContact: 20}, // total 40
+			moderateConv: {self: 4, moderateContact: 4}, // total 8
+		}
+		isGroup := map[uuid.UUID]bool{closeConv: false, moderateConv: false}
+		oneOnOneOwner := map[uuid.UUID]uuid.UUID{closeConv: closeContact, moderateConv: moderateContact}
+
+		// mean = (40+8)/2 contacts = 24.
+		if got, want := computeFrequency(self, closeContact, perConvSenderCounts, isGroup, oneOnOneOwner), 40.0/24.0; !floatsClose(got, want, 1e-9) {
+			t.Errorf("above-average contact: computeFrequency() = %v, want %v", got, want)
+		}
+		if got, want := computeFrequency(self, moderateContact, perConvSenderCounts, isGroup, oneOnOneOwner), 8.0/24.0; !floatsClose(got, want, 1e-9) {
+			t.Errorf("below-average contact: computeFrequency() = %v, want %v", got, want)
+		}
+		// distantContact never appears anywhere in perConvSenderCounts —
+		// attributed[distantContact] defaults to 0.
+		if got := computeFrequency(self, distantContact, perConvSenderCounts, isGroup, oneOnOneOwner); got != 0 {
+			t.Errorf("zero activity in window: computeFrequency() = %v, want 0", got)
+		}
+		if got := computeFrequency(self, closeContact, map[uuid.UUID]map[uuid.UUID]int{}, map[uuid.UUID]bool{}, map[uuid.UUID]uuid.UUID{}); got != 0 {
+			t.Errorf("empty population: computeFrequency() = %v, want 0", got)
+		}
+	})
+
+	t.Run("contact with multiple 1:1 conversation_ids sums across them", func(t *testing.T) {
+		// Same real person reachable through two conversation_ids (e.g.
+		// WhatsApp and Instagram) — summed into ONE contact's attributed
+		// total, not treated as two separate population members. A
+		// second, different contact with an equal-sized single
+		// conversation keeps the population at 2 distinct contacts, so
+		// the mean reflects contacts, not raw conversation count (rule
+		// F's actual point — see this file's own doc comment on why that
+		// differs from the pre-fix per-conversation mean whenever a
+		// contact has more than one conversation).
+		multiContact := uuid.New()
+		otherContact := uuid.New()
+		conv1 := uuid.New()
+		conv2 := uuid.New()
+		otherConv := uuid.New()
+
+		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
+			conv1:     {self: 5, multiContact: 5},   // total 10
+			conv2:     {self: 7, multiContact: 7},   // total 14
+			otherConv: {self: 12, otherContact: 12}, // total 24
+		}
+		isGroup := map[uuid.UUID]bool{conv1: false, conv2: false, otherConv: false}
+		oneOnOneOwner := map[uuid.UUID]uuid.UUID{conv1: multiContact, conv2: multiContact, otherConv: otherContact}
+
+		// attributed = {multiContact: 24, otherContact: 24} -> mean = 24.
+		if got, want := computeFrequency(self, multiContact, perConvSenderCounts, isGroup, oneOnOneOwner), 1.0; !floatsClose(got, want, 1e-9) {
+			t.Errorf("computeFrequency() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("group conversation: own messages only, scaled, Marco never credited", func(t *testing.T) {
+		alice := uuid.New()
+		bob := uuid.New()
+		groupConv := uuid.New()
+
+		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
+			groupConv: {self: 50, alice: 3, bob: 2}, // Marco's 50 messages must never be credited to anyone
+		}
+		isGroup := map[uuid.UUID]bool{groupConv: true}
+		oneOnOneOwner := map[uuid.UUID]uuid.UUID{}
+
+		// attributed = {alice: 0.25*3=0.75, bob: 0.25*2=0.5} -> mean = 0.625.
+		if got, want := computeFrequency(self, alice, perConvSenderCounts, isGroup, oneOnOneOwner), 0.75/0.625; !floatsClose(got, want, 1e-9) {
+			t.Errorf("alice: computeFrequency() = %v, want %v", got, want)
+		}
+		if got, want := computeFrequency(self, bob, perConvSenderCounts, isGroup, oneOnOneOwner), 0.5/0.625; !floatsClose(got, want, 1e-9) {
+			t.Errorf("bob: computeFrequency() = %v, want %v", got, want)
+		}
+		// Marco's own entity ID was never a group member being scored,
+		// but confirm it isn't even present in the attributed population:
+		// if it had leaked in, bob's mean (and thus his frequency) would
+		// be wrong.
+		if got := computeFrequency(self, self, perConvSenderCounts, isGroup, oneOnOneOwner); got != 0 {
+			t.Errorf("Marco's own ID must never accumulate attributed frequency, got %v", got)
+		}
+	})
+
+	t.Run("mixed: a 1:1 DM plus a group, for the same contact", func(t *testing.T) {
+		david := uuid.New()
+		eve := uuid.New()
+		dmConv := uuid.New()
+		groupConv := uuid.New()
+
+		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
+			dmConv:    {self: 6, david: 6},         // total 12
+			groupConv: {self: 10, david: 8, eve: 4}, // david's own group count: 8, eve's: 4
+		}
+		isGroup := map[uuid.UUID]bool{dmConv: false, groupConv: true}
+		oneOnOneOwner := map[uuid.UUID]uuid.UUID{dmConv: david}
+
+		// attributed = {david: 12 + 0.25*8 = 14, eve: 0.25*4 = 1} -> mean = 7.5.
+		if got, want := computeFrequency(self, david, perConvSenderCounts, isGroup, oneOnOneOwner), 14.0/7.5; !floatsClose(got, want, 1e-9) {
+			t.Errorf("david: computeFrequency() = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestClassifyConversations covers rule A's group-detection threshold
+// (>=2 distinct non-self senders, all-time) and the 1:1 owner lookup
+// rule B/C/E all depend on.
+func TestClassifyConversations(t *testing.T) {
+	self := uuid.New()
+	alice := uuid.New()
+	bob := uuid.New()
+
+	oneOnOneConv := uuid.New()
+	groupConv := uuid.New()
+	selfOnlyConv := uuid.New() // degenerate: self messaging itself, should not happen in practice
+
+	senderSets := map[uuid.UUID]map[uuid.UUID]bool{
+		oneOnOneConv: {self: true, alice: true},
+		groupConv:    {self: true, alice: true, bob: true},
+		selfOnlyConv: {self: true},
 	}
 
-	cases := []struct {
-		name            string
-		conversationIDs []uuid.UUID
-		windowCounts    map[uuid.UUID]int
-		want            float64
-	}{
-		{"above-average contact", []uuid.UUID{closeConv}, windowCounts, 40.0 / 24.0},
-		{"below-average contact", []uuid.UUID{moderateConv}, windowCounts, 8.0 / 24.0},
-		{"zero activity in window", []uuid.UUID{distantConv}, windowCounts, 0},
-		{"empty population", []uuid.UUID{closeConv}, map[uuid.UUID]int{}, 0},
-		{"contact with multiple conversation_ids sums across them", []uuid.UUID{closeConv, moderateConv}, windowCounts, 48.0 / 24.0},
+	isGroup, oneOnOneOwner := classifyConversations(self, senderSets)
+
+	if isGroup[oneOnOneConv] {
+		t.Error("a conversation with exactly 1 non-self sender must not be classified as a group")
+	}
+	if owner, ok := oneOnOneOwner[oneOnOneConv]; !ok || owner != alice {
+		t.Errorf("expected alice as the 1:1 owner, got %v (ok=%v)", owner, ok)
 	}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := computeFrequency(c.conversationIDs, c.windowCounts)
-			if !floatsClose(got, c.want, 1e-9) {
-				t.Errorf("computeFrequency() = %v, want %v", got, c.want)
-			}
-		})
+	if !isGroup[groupConv] {
+		t.Error("a conversation with 2 distinct non-self senders must be classified as a group")
+	}
+	if _, ok := oneOnOneOwner[groupConv]; ok {
+		t.Error("a group conversation must not get a 1:1 owner")
+	}
+
+	if isGroup[selfOnlyConv] {
+		t.Error("a conversation where self is the only sender ever must not be classified as a group")
+	}
+	if _, ok := oneOnOneOwner[selfOnlyConv]; ok {
+		t.Error("a self-only conversation has no owner to attribute to")
 	}
 }
 
@@ -69,7 +194,7 @@ func TestReplyLatenciesSeconds_And_Median(t *testing.T) {
 		{SenderID: self, Timestamp: base.Add(260 * time.Second)},    // reply: latency = 260-200 = 60s
 	}
 
-	latencies := replyLatenciesSeconds(contact, msgs)
+	latencies := replyLatenciesSeconds(self, contact, msgs, false)
 	want := []float64{60, 60}
 	if len(latencies) != len(want) {
 		t.Fatalf("replyLatenciesSeconds() = %v, want %v", latencies, want)
@@ -110,9 +235,43 @@ func TestReplyLatenciesSeconds_NoLeadingReplyWithoutInbound(t *testing.T) {
 		{SenderID: self, Timestamp: base.Add(30 * time.Second)},
 	}
 
-	latencies := replyLatenciesSeconds(contact, msgs)
+	latencies := replyLatenciesSeconds(self, contact, msgs, false)
 	if len(latencies) != 0 {
 		t.Errorf("expected no latencies when there's no preceding inbound message, got %v", latencies)
+	}
+}
+
+// TestReplyLatenciesSeconds_Group covers rule D directly: Bob speaks,
+// Marco replies -> attributed to Bob, never to Alice (the regression
+// this whole fix closes — this exact case used to count toward
+// whichever contact's own conversationIDs happened to include this
+// group, regardless of who actually sent the inbound message); a later
+// member's message updates "most recent inbound" so a subsequent Marco
+// reply attributes to THEM; and a pair exceeding groupReplyMaxLatency is
+// excluded outright, not clamped.
+func TestReplyLatenciesSeconds_Group(t *testing.T) {
+	self := uuid.New()
+	alice := uuid.New()
+	bob := uuid.New()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	msgs := []*memory.Message{
+		{SenderID: bob, Timestamp: base},                                            // inbound from Bob
+		{SenderID: self, Timestamp: base.Add(5 * time.Minute)},                       // reply to Bob: latency 300s
+		{SenderID: alice, Timestamp: base.Add(6 * time.Minute)},                      // inbound from Alice — updates "most recent inbound"
+		{SenderID: self, Timestamp: base.Add(7 * time.Minute)},                       // reply to Alice: latency 60s
+		{SenderID: bob, Timestamp: base.Add(8 * time.Minute)},                        // inbound from Bob again
+		{SenderID: self, Timestamp: base.Add(8*time.Minute + 40*time.Minute)},        // reply to Bob, but 40min > the 30min cap -> excluded
+	}
+
+	bobLatencies := replyLatenciesSeconds(self, bob, msgs, true)
+	if len(bobLatencies) != 1 || bobLatencies[0] != 300 {
+		t.Errorf("bob: replyLatenciesSeconds() = %v, want [300]", bobLatencies)
+	}
+
+	aliceLatencies := replyLatenciesSeconds(self, alice, msgs, true)
+	if len(aliceLatencies) != 1 || aliceLatencies[0] != 60 {
+		t.Errorf("alice: replyLatenciesSeconds() = %v, want [60] (the reply to Bob must NOT be attributed to Alice)", aliceLatencies)
 	}
 }
 
@@ -202,10 +361,11 @@ func TestRecomputeRelationshipStats_OrdersContactsSensibly(t *testing.T) {
 	// most one is_self=true row in the whole database, and this test
 	// suite runs repeatedly against a persistent local dev DB with no
 	// per-test reset — a second run would collide on that constraint.
-	// RecomputeRelationshipStats never reads IsSelf itself (see its doc
-	// comment: "sender_id == contactID" is inbound, anything else in that
-	// conversation is Marco — no entity lookup involved), so this field's
-	// value doesn't affect what's under test here.
+	// RecomputeRelationshipStats never reads the entity's IsSelf column
+	// itself (it takes selfID as a plain uuid.UUID parameter — see its
+	// doc comment), so this field's DB value doesn't affect what's under
+	// test here; self.ID is passed to RecomputeRelationshipStats directly
+	// below.
 	self := createTestEntity(t, ctx, entityStore, "Marco")
 
 	closeContact := createTestEntity(t, ctx, entityStore, "Close Contact")
@@ -249,15 +409,15 @@ func TestRecomputeRelationshipStats_OrdersContactsSensibly(t *testing.T) {
 	createTestMessage(t, ctx, msgStore, distantConv, distantContact.ID, distantInboundAt)
 	createTestMessage(t, ctx, msgStore, distantConv, self.ID, distantInboundAt.Add(2*24*time.Hour))
 
-	closeStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, closeContact.ID, now)
+	closeStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, closeContact.ID, now)
 	if err != nil {
 		t.Fatalf("RecomputeRelationshipStats(close): %v", err)
 	}
-	moderateStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, moderateContact.ID, now)
+	moderateStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, moderateContact.ID, now)
 	if err != nil {
 		t.Fatalf("RecomputeRelationshipStats(moderate): %v", err)
 	}
-	distantStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, distantContact.ID, now)
+	distantStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, distantContact.ID, now)
 	if err != nil {
 		t.Fatalf("RecomputeRelationshipStats(distant): %v", err)
 	}
@@ -330,11 +490,11 @@ func TestRecomputeRelationshipStats_UpsertOverwritesNotAccumulates(t *testing.T)
 	createTestMessage(t, ctx, msgStore, conv, contact.ID, now.Add(-time.Hour))
 	createTestMessage(t, ctx, msgStore, conv, self.ID, now.Add(-50*time.Minute))
 
-	first, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, contact.ID, now)
+	first, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, contact.ID, now)
 	if err != nil {
 		t.Fatalf("first RecomputeRelationshipStats: %v", err)
 	}
-	second, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, contact.ID, now.Add(time.Minute))
+	second, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, contact.ID, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("second RecomputeRelationshipStats: %v", err)
 	}

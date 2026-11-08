@@ -164,7 +164,7 @@ func run() error {
 		}
 	}
 
-	stats, err := reflection.RecomputeRelationshipStats(runCtx, statsStore, edgeStore, msgStore, contact.ID, now)
+	stats, err := reflection.RecomputeRelationshipStats(runCtx, statsStore, edgeStore, msgStore, self.ID, contact.ID, now)
 	if err != nil {
 		return fmt.Errorf("RecomputeRelationshipStats: %w", err)
 	}
