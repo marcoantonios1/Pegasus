@@ -511,6 +511,306 @@ func TestRecomputeRelationshipStats_UpsertOverwritesNotAccumulates(t *testing.T)
 	}
 }
 
+// TestRecomputeRelationshipStats_MissingSelfEntityReturnsError covers
+// requirement 11: selfID == uuid.Nil (the caller found no is_self
+// entity) must return a clear error, never fall back to guessing. No
+// database needed — the check happens before any store call.
+func TestRecomputeRelationshipStats_MissingSelfEntityReturnsError(t *testing.T) {
+	ctx := context.Background()
+	_, err := RecomputeRelationshipStats(ctx, nil, nil, nil, uuid.Nil, uuid.New(), time.Now())
+	if err == nil {
+		t.Fatal("expected an error when selfID is uuid.Nil (no self entity configured)")
+	}
+}
+
+// TestRecomputeRelationshipStats_GroupChat covers requirement 7: a
+// 3+-person group chat (Marco, Alice, Bob, Carol), with every claim
+// hand-computed exactly rather than just checked for ordering, since the
+// whole point of this fix is that specific numbers used to be wrong.
+//
+//   - Alice never sends a message within the trailing window (her one
+//     message is 30 days old, outside DefaultRelationshipStatsWindow) —
+//     frequency reflects that (0), not the group's general activity.
+//     Before this fix, her conversationIDs would include this group
+//     conversation and she'd be credited with the WHOLE window's volume
+//     (Marco's and Bob's messages too) despite having said nothing
+//     herself this window.
+//   - Bob sends 5 messages within the window: frequency reflects ONLY
+//     his own count (scaled by groupActivityWeight), and since he's the
+//     only contact with any attributed activity this window, the
+//     cross-contact mean collapses to exactly his own value, giving
+//     frequency == 1.0 exactly.
+//   - Bob speaks, Marco replies (4 pairs, each fast; this is the exact
+//     repro of the bug: before this fix, that reply counted toward
+//     EVERY contact whose conversationIDs included this group, Alice
+//     included) — asserted NOT counted toward Alice's reply speed
+//     (hers is the no-pairs sentinel) and IS counted toward Bob's
+//     (median of the 4 fast pairs).
+//   - A 5th Bob/Marco pair exceeds groupReplyMaxLatency and is excluded
+//     from Bob's median.
+//   - Carol never sends anything at all — frequency 0, reply speed the
+//     sentinel.
+//   - Recency: rule E — Alice's OWN last message (30 days ago) drives
+//     her closeness's recency component, not the group's overall last
+//     message (which is effectively "yesterday," via Bob). Asserted via
+//     an exact hand-computed Closeness value: if the bug's group-wide
+//     recency were still in effect, Alice's Closeness would be far
+//     higher than this.
+func TestRecomputeRelationshipStats_GroupChat(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+	msgStore := memory.NewMessageStore(pool)
+	statsStore := memory.NewRelationshipStatsStore(pool)
+
+	self := createTestEntity(t, ctx, entityStore, "Group Chat Marco "+uuid.New().String())
+	alice := createTestEntity(t, ctx, entityStore, "Group Chat Alice "+uuid.New().String())
+	bob := createTestEntity(t, ctx, entityStore, "Group Chat Bob "+uuid.New().String())
+	carol := createTestEntity(t, ctx, entityStore, "Group Chat Carol "+uuid.New().String())
+
+	now := time.Now()
+	groupConv := uuid.New()
+
+	// Alice's only message: 30 days ago, outside the 28-day window.
+	aliceMessageAt := now.Add(-30 * 24 * time.Hour)
+	createTestMessage(t, ctx, msgStore, groupConv, alice.ID, aliceMessageAt)
+
+	// Bob: 4 fast reply pairs (within groupReplyMaxLatency), then a 5th
+	// pair whose reply is too slow — all within the window. Bob's LAST
+	// message (the final pair's inbound) lands ~1 day ago, so the group
+	// (via Bob) is "active yesterday" while Alice has been silent for 30
+	// days.
+	for i := 3; i >= 0; i-- {
+		bobAt := now.Add(-time.Duration(2+i) * 24 * time.Hour)
+		createTestMessage(t, ctx, msgStore, groupConv, bob.ID, bobAt)
+		createTestMessage(t, ctx, msgStore, groupConv, self.ID, bobAt.Add(3*time.Minute))
+	}
+	slowBobAt := now.Add(-1 * 24 * time.Hour)
+	createTestMessage(t, ctx, msgStore, groupConv, bob.ID, slowBobAt)
+	createTestMessage(t, ctx, msgStore, groupConv, self.ID, slowBobAt.Add(40*time.Minute))
+
+	// Carol never sends anything — present in entities only, like a real
+	// group member who never happens to speak.
+	_ = carol
+
+	aliceStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, alice.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(alice): %v", err)
+	}
+	bobStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, bob.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(bob): %v", err)
+	}
+	carolStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, carol.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(carol): %v", err)
+	}
+
+	// --- Frequency: only Bob has any attributed activity this window,
+	// so the cross-contact mean collapses to exactly his own value. ---
+	if !floatsClose(aliceStats.Frequency, 0, 1e-9) {
+		t.Errorf("alice: expected frequency 0 (silent this window), got %v — the bug would credit her with the group's general activity instead", aliceStats.Frequency)
+	}
+	if !floatsClose(bobStats.Frequency, 1.0, 1e-9) {
+		t.Errorf("bob: expected frequency exactly 1.0 (sole active contact this window), got %v", bobStats.Frequency)
+	}
+	if !floatsClose(carolStats.Frequency, 0, 1e-9) {
+		t.Errorf("carol: expected frequency 0 (never spoke), got %v", carolStats.Frequency)
+	}
+
+	// --- Reply speed: Bob's 4 fast pairs, never counted toward Alice. ---
+	if aliceStats.ReplySpeed != noReplyPairsSentinel {
+		t.Errorf("alice: expected the no-reply-pairs sentinel (Bob's replies must not count toward her), got %v", aliceStats.ReplySpeed)
+	}
+	if !floatsClose(bobStats.ReplySpeed, 180, 1e-9) {
+		t.Errorf("bob: expected median reply latency 180s (4 fast pairs), got %v — the slow 5th pair must be excluded by groupReplyMaxLatency, not just averaged in", bobStats.ReplySpeed)
+	}
+	if carolStats.ReplySpeed != noReplyPairsSentinel {
+		t.Errorf("carol: expected the no-reply-pairs sentinel (silent), got %v", carolStats.ReplySpeed)
+	}
+
+	// --- Recency (rule E), via an exact hand-computed Closeness: Alice's
+	// OWN last message (30 days ago) must drive her recency component,
+	// not the group's overall last message (~1 day ago, via Bob). ---
+	wantAliceCloseness := weightRecency * math.Exp(-30.0/recencyHalfLifeDays)
+	if !floatsClose(aliceStats.Closeness, wantAliceCloseness, 1e-6) {
+		t.Errorf("alice: expected closeness %v (recency from her own 30-day-old message), got %v — the bug would use the group's ~1-day-old recency instead, scoring her far higher", wantAliceCloseness, aliceStats.Closeness)
+	}
+}
+
+// TestRecomputeRelationshipStats_MixedOneOnOneAndGroup covers requirement
+// 8: a contact (David) with both a 1:1 DM and a group — attributed
+// activity is the DM's total plus groupActivityWeight times his own
+// group message count, hand-computed exactly.
+func TestRecomputeRelationshipStats_MixedOneOnOneAndGroup(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+	msgStore := memory.NewMessageStore(pool)
+	statsStore := memory.NewRelationshipStatsStore(pool)
+
+	self := createTestEntity(t, ctx, entityStore, "Mixed Marco "+uuid.New().String())
+	david := createTestEntity(t, ctx, entityStore, "Mixed David "+uuid.New().String())
+	eve := createTestEntity(t, ctx, entityStore, "Mixed Eve "+uuid.New().String())
+
+	now := time.Now()
+
+	// David's 1:1 DM: 6 messages each direction (total 12), all within
+	// the window.
+	dmConv := uuid.New()
+	for i := 0; i < 6; i++ {
+		at := now.Add(-time.Duration(i+1) * time.Hour)
+		createTestMessage(t, ctx, msgStore, dmConv, david.ID, at)
+		createTestMessage(t, ctx, msgStore, dmConv, self.ID, at.Add(time.Minute))
+	}
+
+	// A group David and Eve are both in: David sends 8, Eve sends 4,
+	// Marco sends some too (never credited to either).
+	groupConv := uuid.New()
+	for i := 0; i < 8; i++ {
+		createTestMessage(t, ctx, msgStore, groupConv, david.ID, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+	for i := 0; i < 4; i++ {
+		createTestMessage(t, ctx, msgStore, groupConv, eve.ID, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+	for i := 0; i < 3; i++ {
+		createTestMessage(t, ctx, msgStore, groupConv, self.ID, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	davidStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, david.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(david): %v", err)
+	}
+
+	// attributed(david) = 12 (DM total) + 0.25*8 (own group messages) = 14.
+	// attributed(eve) = 0.25*4 = 1.
+	// mean = (14+1)/2 = 7.5.
+	want := 14.0 / 7.5
+	if !floatsClose(davidStats.Frequency, want, 1e-9) {
+		t.Errorf("david: expected frequency %v (DM total + weighted own group messages), got %v", want, davidStats.Frequency)
+	}
+}
+
+// TestRecomputeRelationshipStats_HighVolumeGroupNotMember covers
+// requirement 9: a high-volume group the contact is not in must not
+// change their 1:1 frequency beyond what rule F's mean predicts — the
+// group's members dilute the cross-contact mean (as they should, being
+// genuinely active contacts themselves), but never touch the contact's
+// own numerator.
+func TestRecomputeRelationshipStats_HighVolumeGroupNotMember(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+	msgStore := memory.NewMessageStore(pool)
+	statsStore := memory.NewRelationshipStatsStore(pool)
+
+	self := createTestEntity(t, ctx, entityStore, "HighVol Marco "+uuid.New().String())
+	frank := createTestEntity(t, ctx, entityStore, "HighVol Frank "+uuid.New().String())
+	grace := createTestEntity(t, ctx, entityStore, "HighVol Grace "+uuid.New().String())
+	henry := createTestEntity(t, ctx, entityStore, "HighVol Henry "+uuid.New().String())
+
+	now := time.Now()
+
+	// Frank: an ordinary 1:1 DM, total window count 20.
+	frankConv := uuid.New()
+	for i := 0; i < 10; i++ {
+		at := now.Add(-time.Duration(i+1) * time.Hour)
+		createTestMessage(t, ctx, msgStore, frankConv, frank.ID, at)
+		createTestMessage(t, ctx, msgStore, frankConv, self.ID, at.Add(time.Minute))
+	}
+
+	// A high-volume group Frank is NOT a member of at all: Grace and
+	// Henry, 100 messages each within the window.
+	busyGroupConv := uuid.New()
+	for i := 0; i < 100; i++ {
+		createTestMessage(t, ctx, msgStore, busyGroupConv, grace.ID, now.Add(-time.Duration(i+1)*time.Minute))
+		createTestMessage(t, ctx, msgStore, busyGroupConv, henry.ID, now.Add(-time.Duration(i+1)*time.Minute))
+	}
+
+	frankStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, frank.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(frank): %v", err)
+	}
+
+	// attributed(frank) = 20. attributed(grace) = 0.25*100 = 25.
+	// attributed(henry) = 0.25*100 = 25. mean = (20+25+25)/3 = 70/3.
+	want := 20.0 / (70.0 / 3.0)
+	if !floatsClose(frankStats.Frequency, want, 1e-9) {
+		t.Errorf("frank: expected frequency %v (unchanged numerator, mean diluted by the group's own real members), got %v", want, frankStats.Frequency)
+	}
+}
+
+// TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow
+// covers requirement 10: a conversation with 2 distinct non-self senders
+// ALL-TIME, but only 1 of them active THIS window, must still classify
+// as a group — not fall back to 1:1 behavior just because the window is
+// quiet for everyone but one member.
+//
+// Bob's only message is 60 days old (outside the window) — just enough
+// to make this conversation a group by rule A's all-time rule, without
+// contributing anything to this window's counts. Alice is the only
+// member active this window. A second, genuinely-1:1 contact (Zoe) gives
+// the cross-contact population 2 members, so a misclassification (this
+// conversation treated as 1:1 this window, crediting Alice with its
+// WHOLE window volume instead of just her own, scaled) would produce a
+// clearly different, wrong frequency value rather than one that
+// happens to coincide by accident.
+func TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+	msgStore := memory.NewMessageStore(pool)
+	statsStore := memory.NewRelationshipStatsStore(pool)
+
+	self := createTestEntity(t, ctx, entityStore, "AllTime Marco "+uuid.New().String())
+	alice := createTestEntity(t, ctx, entityStore, "AllTime Alice "+uuid.New().String())
+	bob := createTestEntity(t, ctx, entityStore, "AllTime Bob "+uuid.New().String())
+	zoe := createTestEntity(t, ctx, entityStore, "AllTime Zoe "+uuid.New().String())
+
+	now := time.Now()
+
+	groupConv := uuid.New()
+	// Bob's one message: 60 days ago, well outside the window — present
+	// only so this conversation has 2 distinct non-self senders all-time.
+	createTestMessage(t, ctx, msgStore, groupConv, bob.ID, now.Add(-60*24*time.Hour))
+	// Alice: 4 messages this window, each followed by a Marco reply (6
+	// Marco messages total — more than Alice's own, so a 1:1
+	// misclassification and a correct group classification would produce
+	// visibly different numbers).
+	for i := 0; i < 4; i++ {
+		createTestMessage(t, ctx, msgStore, groupConv, alice.ID, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+	for i := 0; i < 6; i++ {
+		createTestMessage(t, ctx, msgStore, groupConv, self.ID, now.Add(-time.Duration(i+1)*time.Minute))
+	}
+
+	// Zoe: an ordinary 1:1 DM, total window count 5.
+	zoeConv := uuid.New()
+	createTestMessage(t, ctx, msgStore, zoeConv, zoe.ID, now.Add(-30*time.Minute))
+	for i := 0; i < 4; i++ {
+		createTestMessage(t, ctx, msgStore, zoeConv, self.ID, now.Add(-time.Duration(i+1)*time.Minute))
+	}
+
+	aliceStats, err := RecomputeRelationshipStats(ctx, statsStore, edgeStore, msgStore, self.ID, alice.ID, now)
+	if err != nil {
+		t.Fatalf("RecomputeRelationshipStats(alice): %v", err)
+	}
+
+	// Correct (group): attributed(alice) = 0.25*4 = 1. attributed(zoe) = 5.
+	// mean = 6/2 = 3. frequency = 1/3.
+	// If misclassified as 1:1, attributed(alice) would instead be the
+	// WHOLE window total (4+6=10), giving a visibly different frequency
+	// (10/7.5 = 1.333...) — asserting the correct value rules that out.
+	want := 1.0 / 3.0
+	if !floatsClose(aliceStats.Frequency, want, 1e-9) {
+		t.Errorf("alice: expected frequency %v (classified as a group by all-time participant count), got %v — a window-based classification would misclassify this as 1:1 and produce a different value", want, aliceStats.Frequency)
+	}
+}
+
 // TestCountExplicitSignalEdges_ExcludesTombstone covers the delete-
 // exclusion audit's one real finding in this package (requirement 9/15):
 // countExplicitSignalEdges only checks SupersededBy == nil (live), with
