@@ -103,14 +103,20 @@ func (s *EdgeStore) MergeDuplicateEdges(ctx context.Context, survivorID uuid.UUI
 	for _, id := range ids {
 		e, lockErr := lockEdgeForUpdate(ctx, tx, id)
 		if lockErr != nil {
-			// lockEdgeForUpdate wraps every failure (not-found or
-			// otherwise) as ErrEdgeNotFound — the same imprecision
-			// CorrectMemory/SoftDelete already live with, not something
-			// this method invents. A missing row is exactly the kind of
-			// "caller's view no longer matches reality" this method's
-			// own ErrMergeConflict exists for (edges are never hard-
-			// deleted, so in practice this means a stale/invalid
-			// candidate ID, not data that actually vanished).
+			// lockEdgeForUpdate now distinguishes a genuinely missing row
+			// (ErrEdgeNotFound, wrapping pgx.ErrNoRows) from every other
+			// failure — see its own doc comment for the fix (it used to
+			// wrap EVERYTHING as ErrEdgeNotFound, which would have made
+			// this check silently convert a real infrastructure failure,
+			// e.g. a connection error or a deadlock, into ErrMergeConflict
+			// below — downgrading a hard failure the caller
+			// (reflection.MergeDuplicates) should stop on into a benign
+			// skip). A genuinely missing row IS exactly the kind of
+			// "caller's view no longer matches reality" this method's own
+			// ErrMergeConflict exists for (edges are never hard-deleted,
+			// so in practice this means a stale/invalid candidate ID, not
+			// data that actually vanished) — anything else is a real
+			// error and must propagate as one.
 			if errors.Is(lockErr, ErrEdgeNotFound) {
 				return nil, ErrMergeConflict
 			}

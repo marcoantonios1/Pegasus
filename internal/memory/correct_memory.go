@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // SourceTypeUserCorrection is the source_type CorrectMemory always writes.
@@ -15,9 +16,23 @@ import (
 // on Edge.SourceType's own comment, so no migration is needed to add it.
 const SourceTypeUserCorrection = "user_correction"
 
-// ErrEdgeNotFound is returned by CorrectMemory when oldEdgeID doesn't
-// exist. Wraps pgx.ErrNoRows, so callers can check either this or
-// pgx.ErrNoRows via errors.Is.
+// ErrEdgeNotFound is returned by CorrectMemory and SoftDelete when
+// oldEdgeID does NOT EXIST — and only then. Wraps pgx.ErrNoRows (the one
+// and only condition that produces it), so callers can check either this
+// or pgx.ErrNoRows via errors.Is, and can rely on it meaning exactly
+// "this row does not exist," never anything else.
+//
+// That exclusivity used to NOT hold: lockEdgeForUpdate previously wrapped
+// EVERY query failure as ErrEdgeNotFound, not just a genuine missing row
+// — a connection failure, a context cancellation/deadline, a deadlock
+// (SQLSTATE 40P01) or a lock-not-available error (55P03) all looked
+// identical to "the edge doesn't exist" to every caller checking this
+// sentinel. See lockEdgeForUpdate's own doc comment for the fix and why
+// it mattered: a caller treating ErrEdgeNotFound as a benign, skippable
+// outcome (reflection.MergeDuplicates' dedup pass did exactly this, via
+// EdgeStore.MergeDuplicateEdges' own ErrEdgeNotFound->ErrMergeConflict
+// translation) could silently swallow a real infrastructure failure as
+// if it were just stale candidate data.
 var ErrEdgeNotFound = errors.New("memory: edge not found")
 
 // ErrEdgeAlreadySuperseded is returned by CorrectMemory when oldEdgeID has
@@ -66,7 +81,14 @@ type CorrectionInput struct {
 }
 
 // CorrectMemory implements proposal §7.6's dedicated correction write
-// path. A correction from Marco does not compete as a normal extracted
+// path. Returns ErrEdgeNotFound ONLY when oldEdgeID does not exist — any
+// other failure (a connection error, context cancellation/deadline, a
+// deadlock, a lock-wait failure) comes back as its own distinct,
+// unwrapped-into-a-sentinel error (see lockEdgeForUpdate's own doc
+// comment); a caller must not treat every error from this method as "no
+// such edge."
+//
+// A correction from Marco does not compete as a normal extracted
 // edge through decay/confidence math — it short-circuits the pipeline:
 //
 //   - Confidence is hardcoded to 1.0 here, not derived from
@@ -168,6 +190,21 @@ func (s *EdgeStore) CorrectMemory(ctx context.Context, oldEdgeID uuid.UUID, corr
 // SupersededBy as nil and both proceed — the second waits for the first
 // transaction to commit or roll back, then sees its actual, current
 // SupersededBy value.
+//
+// Error classification fix: this used to wrap EVERY Scan error as
+// ErrEdgeNotFound unconditionally — `fmt.Errorf("%w: %w", ErrEdgeNotFound,
+// err)` ran regardless of what err actually was, so a connection
+// failure, a context cancellation/deadline, a deadlock, or a lock-wait
+// failure all came back looking exactly like "this edge doesn't exist."
+// Now only a genuine pgx.ErrNoRows gets that treatment; every other
+// error is returned wrapped with context (edge ID) via %w and nothing
+// else, so errors.Is(err, context.Canceled)/context.DeadlineExceeded and
+// errors.As(err, *pgconn.PgError) (checking .Code for a deadlock/lock
+// SQLSTATE) still work for a caller that needs to distinguish those —
+// see ErrEdgeNotFound's own doc comment for a real caller
+// (reflection.MergeDuplicates, via EdgeStore.MergeDuplicateEdges) this
+// previously misled into silently skipping what should have been a hard
+// failure.
 func lockEdgeForUpdate(ctx context.Context, tx queryer, id uuid.UUID) (*Edge, error) {
 	var e Edge
 
@@ -187,7 +224,10 @@ func lockEdgeForUpdate(ctx context.Context, tx queryer, id uuid.UUID) (*Edge, er
 		&e.SupersededBy, &e.IsCorrection,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrEdgeNotFound, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %w", ErrEdgeNotFound, err)
+		}
+		return nil, fmt.Errorf("lock edge %s for update: %w", id, err)
 	}
 
 	return &e, nil
