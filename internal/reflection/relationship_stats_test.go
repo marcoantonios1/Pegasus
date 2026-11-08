@@ -3,6 +3,7 @@ package reflection
 import (
 	"context"
 	"math"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -15,40 +16,49 @@ func floatsClose(a, b, epsilon float64) bool {
 	return math.Abs(a-b) <= epsilon
 }
 
-// futureTestOffset* anchor each test's synthetic "now" far in the
-// future (over a year out) rather than at the real wall-clock
-// time.Now(), purely so the exact-hand-computed-value tests for rule
-// F's cross-contact mean (TestRecomputeRelationshipStats_GroupChat and
-// its siblings below) don't collide with this suite's own shared,
-// never-reset dev database: rule F's mean is explicitly computed over
-// EVERY contact with any activity in the trailing
-// DefaultRelationshipStatsWindow, globally, by design (not scoped to one
-// test's own conversations — see RecomputeRelationshipStats' own doc
-// comment) — so a test anchored at the real time.Now() would have its
-// expected mean silently polluted by whatever other tests, run at any
-// point in this same session, happened to insert messages timestamped
-// within the last 28 real days. Anchoring in the future sidesteps that
-// without needing to scope or mock the query itself: nothing else in
-// this database has ever been written with a future timestamp, so a
-// window computed from a future "now" is guaranteed to contain only
-// this test's own messages — AS LONG AS each such test uses a
-// DIFFERENTLY-OFFSET future anchor from every other one (confirmed
-// necessary, not just defensive: an earlier version of these tests all
-// used the SAME future offset and polluted EACH OTHER's populations the
-// exact same way real contemporaneous tests would have). Each constant
-// here is spaced more than DefaultRelationshipStatsWindow (28 days)
-// apart from its neighbors, so their trailing windows can never overlap.
+// futureTestNow anchors a test's synthetic "now" at a RANDOM point far
+// in the future (hundreds to tens of thousands of days out) rather than
+// at the real wall-clock time.Now(), purely so the exact-hand-computed-
+// value tests for rule F's cross-contact mean
+// (TestRecomputeRelationshipStats_GroupChat and its siblings below)
+// don't collide with this suite's own shared, never-reset dev database:
+// rule F's mean is explicitly computed over EVERY contact with any
+// activity in the trailing DefaultRelationshipStatsWindow, globally, by
+// design (not scoped to one test's own conversations — see
+// RecomputeRelationshipStats' own doc comment) — so a test anchored at
+// the real time.Now() would have its expected mean silently polluted by
+// whatever other tests, run at any point in this same session, happened
+// to insert messages timestamped within the last 28 real days.
+// Anchoring in the future sidesteps that without needing to scope or
+// mock the query itself: nothing else in this database has ever been
+// written with a future timestamp, so a window computed from a future
+// "now" is guaranteed to contain only this test's own messages.
+//
+// RANDOM, not a fixed per-test constant — confirmed necessary, not just
+// defensive: an earlier version of this used fixed offsets (one shared
+// constant, then one distinct constant per test) and got bitten twice —
+// first by every test polluting every OTHER test's population by
+// sharing one offset, then, after giving each test its own fixed
+// offset, by a PREVIOUS run of this same test file (during this fix's
+// own development) leaving behind rows at that same fixed offset, which
+// the NEXT run then collided with. A random offset avoids both: the
+// draw space (hundreds of years) makes any two draws landing within
+// DefaultRelationshipStatsWindow (28 days) of each other astronomically
+// unlikely, across tests in one run AND across repeated runs over the
+// life of this database — the same reasoning internal/api's
+// randomBasisIndex already established for an analogous shared-DB
+// collision risk.
+//
 // Confirmed safe to use future timestamps at all: MessageStore.Create
 // has no future-timestamp clamp (that only exists in internal/api's
 // write pipeline, for edges' FirstSeen/LastReinforced — see
 // clampFutureTimestamp's own doc comment — and these tests write
 // messages directly via msgStore.Create, never through that pipeline).
-const (
-	futureTestOffsetGroupChat       = 400 * 24 * time.Hour
-	futureTestOffsetMixed           = 470 * 24 * time.Hour
-	futureTestOffsetHighVolume      = 540 * 24 * time.Hour
-	futureTestOffsetAllTimeClassify = 610 * 24 * time.Hour
-)
+func futureTestNow(t *testing.T) time.Time {
+	t.Helper()
+	days := 400 + rand.Intn(100000)
+	return time.Now().Add(time.Duration(days) * 24 * time.Hour)
+}
 
 // --- Requirement 7: unit tests for each formula component in isolation ---
 
@@ -604,7 +614,7 @@ func TestRecomputeRelationshipStats_GroupChat(t *testing.T) {
 	bob := createTestEntity(t, ctx, entityStore, "Group Chat Bob "+uuid.New().String())
 	carol := createTestEntity(t, ctx, entityStore, "Group Chat Carol "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffsetGroupChat) // see futureTestOffsetGroupChat's own doc comment
+	now := futureTestNow(t)
 	groupConv := uuid.New()
 
 	// Alice's only message: 30 days ago, outside the 28-day window.
@@ -690,7 +700,7 @@ func TestRecomputeRelationshipStats_MixedOneOnOneAndGroup(t *testing.T) {
 	david := createTestEntity(t, ctx, entityStore, "Mixed David "+uuid.New().String())
 	eve := createTestEntity(t, ctx, entityStore, "Mixed Eve "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffsetMixed) // see futureTestOffsetMixed's own doc comment
+	now := futureTestNow(t)
 
 	// David's 1:1 DM: 6 messages each direction (total 12), all within
 	// the window.
@@ -747,7 +757,7 @@ func TestRecomputeRelationshipStats_HighVolumeGroupNotMember(t *testing.T) {
 	grace := createTestEntity(t, ctx, entityStore, "HighVol Grace "+uuid.New().String())
 	henry := createTestEntity(t, ctx, entityStore, "HighVol Henry "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffsetHighVolume) // see futureTestOffsetHighVolume's own doc comment
+	now := futureTestNow(t)
 
 	// Frank: an ordinary 1:1 DM, total window count 20.
 	frankConv := uuid.New()
@@ -806,7 +816,7 @@ func TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow(t *testing
 	bob := createTestEntity(t, ctx, entityStore, "AllTime Bob "+uuid.New().String())
 	zoe := createTestEntity(t, ctx, entityStore, "AllTime Zoe "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffsetAllTimeClassify) // see futureTestOffsetAllTimeClassify's own doc comment
+	now := futureTestNow(t)
 
 	groupConv := uuid.New()
 	// Bob's one message: 60 days ago, well outside the window — present
