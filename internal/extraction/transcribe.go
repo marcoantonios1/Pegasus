@@ -107,13 +107,24 @@ type TranscribeOptions struct {
 // callers — specifically Transcribe's own retry-on-502 logic — can
 // distinguish a transient failure from a genuine one without parsing
 // error text.
+//
+// Carries a responseSummary (status, Content-Type, Content-Encoding,
+// body length, hash prefix, and error.type/error.code if present) in
+// place of the raw response body a previous version of this type kept
+// in a Body field — the response-content-leak fix: a transcription
+// error body can contain real transcript text (a provider's error
+// message routinely echoes back something about the request that
+// failed), which must never land in an error string a caller might log.
+// StatusCode stays a direct field (not folded into Summary) since
+// Transcribe's own 502-retry check and the voice pipeline's callers both
+// compare it directly via errors.As.
 type TranscriptionStatusError struct {
 	StatusCode int
-	Body       string
+	Summary    responseSummary
 }
 
 func (e *TranscriptionStatusError) Error() string {
-	return fmt.Sprintf("costguard returned status %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("costguard returned status %d (%s)", e.StatusCode, e.Summary)
 }
 
 // DefaultTranscriptionRetryBackoff is how long Transcribe waits before its
@@ -307,25 +318,18 @@ func (c *CostguardClient) transcribeOnce(ctx context.Context, audio []byte, file
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(resp, c.maxTranscriptionResponseBytes())
 	if err != nil {
-		return nil, fmt.Errorf("read costguard response: %w", err)
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, &TranscriptionStatusError{StatusCode: resp.StatusCode, Body: truncateForError(string(respBody), 500)}
+		return nil, &TranscriptionStatusError{StatusCode: resp.StatusCode, Summary: summarizeResponse(resp, respBody)}
 	}
 
 	var parsed TranscriptionResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("parse transcription response: %w (body: %s)", err, truncateForError(string(respBody), 500))
+		return nil, fmt.Errorf("parse transcription response: %w (%s)", err, summarizeResponse(resp, respBody))
 	}
 
 	return &parsed, nil
-}
-
-func truncateForError(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

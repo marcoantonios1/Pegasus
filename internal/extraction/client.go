@@ -2,13 +2,10 @@ package extraction
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -39,6 +36,20 @@ type CostguardClient struct {
 	// can inject a short backoff instead of a real test run needing to
 	// wait out 30s per retry case.
 	TranscriptionRetryBackoff time.Duration
+
+	// MaxResponseBytes overrides the response-size limit CompleteWithModel
+	// and Embed enforce via readResponseBody (see DefaultMaxResponseBytes'
+	// own doc comment for why 4 MiB). Zero uses the default — a field
+	// rather than a package const specifically so tests can inject a tiny
+	// limit instead of a real test needing to generate a multi-megabyte
+	// body to exercise the oversize path.
+	MaxResponseBytes int64
+
+	// MaxTranscriptionResponseBytes is MaxResponseBytes' own counterpart
+	// for Transcribe, which needs a larger limit (see
+	// DefaultMaxTranscriptionResponseBytes' own doc comment for why).
+	// Zero uses the default.
+	MaxTranscriptionResponseBytes int64
 }
 
 func NewCostguardClient(baseURL string) *CostguardClient {
@@ -129,12 +140,12 @@ func (c *CostguardClient) Embed(ctx context.Context, text string) ([]float32, er
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(resp, c.maxResponseBytes())
 	if err != nil {
-		return nil, fmt.Errorf("read costguard response: %w", err)
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("costguard returned status %d: %s", resp.StatusCode, respBody)
+		return nil, fmt.Errorf("costguard returned an error (%s)", summarizeResponse(resp, respBody))
 	}
 
 	var parsed embeddingResponse
@@ -162,84 +173,28 @@ func (c *CostguardClient) Complete(ctx context.Context, prompt string) (string, 
 	return c.CompleteWithModel(ctx, Model, prompt)
 }
 
-// gzipMagic is gzip's two-byte magic number (RFC 1952 §2.3.1). Used as a
-// fallback signal alongside the Content-Encoding header — see
-// maybeDecompressGzip's own doc comment for why a header-only check isn't
-// enough here.
-var gzipMagic = []byte{0x1f, 0x8b}
-
-// maybeDecompressGzip returns body decompressed if it's gzip, or body
-// unchanged otherwise. "Is it gzip" is decided two ways, not just one:
-//
-//   - contentEncoding == "gzip" (case-insensitive) — the standard,
-//     correct HTTP signal, and the one a response SHOULD carry.
-//   - body's own first two bytes are gzip's magic number (0x1f 0x8b),
-//     regardless of what Content-Encoding said (including empty/absent).
-//
-// The second check exists because of what this fix's own investigation
-// found, not as speculative defense: this bug (internal/extraction/
-// client.go's CompleteWithModel choking on a gzip-magic-prefixed byte via
-// encoding/json's "invalid character '\x1f'") could NOT be reproduced
-// live against a real Costguard instance across several direct curl
-// tests (both models, small and large responses, with and without an
-// explicit Accept-Encoding: gzip) — every one came back with NO
-// Content-Encoding header and plain JSON. Costguard's own
-// internal/providers/openaicompat package already relies on Go's
-// standard transparent gzip decompression when ITS OWN client talks to
-// an upstream provider (see its TestDo_GzippedUpstreamBody_MeteredCorrectly),
-// and its cache-entry cloning (internal/gateway/response.go's
-// cloneHeader) explicitly, deliberately excludes Content-Encoding when
-// copying headers — "cached bodies are always stored decoded... replaying
-// a Content-Encoding header would be wrong" — which is Costguard's own
-// maintainers already treating this exact header/body mismatch as a real
-// hazard elsewhere in that codebase, not a hypothetical one here. Given
-// the failure DID happen once against real traffic with the unmistakable
-// gzip magic byte, could not be reproduced deterministically, and
-// Costguard's own code shows awareness of body/header decode mismatches
-// as a live concern (caching/retry/streaming paths not audited here — out
-// of scope for a Pegasus-side fix) — the most defensible read is an
-// intermittent condition where compressed bytes reach this client
-// without a Content-Encoding header to announce them. A header-only check
-// (as a literal, minimal fix would do) would silently NOT fix that exact
-// case. Sniffing the actual bytes closes it regardless of which
-// Costguard-side path produced it.
-func maybeDecompressGzip(body []byte, contentEncoding string) ([]byte, error) {
-	isGzipEncoding := strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip")
-	isGzipMagic := len(body) >= 2 && body[0] == gzipMagic[0] && body[1] == gzipMagic[1]
-	if !isGzipEncoding && !isGzipMagic {
-		return body, nil
-	}
-
-	r, err := gzip.NewReader(bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("open gzip reader: %w", err)
-	}
-	defer r.Close()
-
-	decoded, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("decompress gzip body: %w", err)
-	}
-	return decoded, nil
-}
-
 // CompleteWithModel is Complete generalized to a caller-chosen model. See
 // Complete's doc comment for why this exists as a separate method rather
 // than adding a model parameter to Complete itself (signature stability
 // for existing callers).
 //
-// Response decompression (maybeDecompressGzip) happens here, the one
-// place both Complete (a thin wrapper) and Triager's CompleteWithModel
-// calls converge on — not duplicated into a second call site. Applied
-// BEFORE the status-code check so a gzip-compressed ERROR body (not just
-// a 200) still produces a readable message rather than raw bytes in the
-// error string. Embed (/v1/embeddings) and Transcribe (/v1/audio/
-// transcriptions) are deliberately NOT touched here — this fix is scoped
-// to the endpoint and failure this issue actually investigated
-// (/v1/chat/completions); Embed's own quick check during this
-// investigation was inconclusive (a connection failure unrelated to
-// gzip, not a confirmed clean non-gzip response), so extending this fix
-// there would be an unverified assumption, not a confirmed finding.
+// Response reading (readResponseBody, which also runs maybeDecompressGzip)
+// happens here, the one place both Complete (a thin wrapper) and
+// Triager's CompleteWithModel calls converge on — not duplicated into a
+// second call site. Decompression is applied BEFORE the status-code
+// check so a gzip-compressed ERROR body (not just a 200) still produces
+// a readable summary rather than raw/compressed bytes feeding the error.
+//
+// Embed and Transcribe route through this same readResponseBody/
+// summarizeResponse infrastructure now too (the unbounded-reads and
+// response-content-leak fix) — Embed and Transcribe therefore also gain
+// gzip handling as a small, deliberate side effect: the original gzip
+// fix had scoped them out as unverified (Embed's own quick check back
+// then was inconclusive — a connection failure unrelated to gzip, not a
+// confirmed clean non-gzip response), but the magic-byte sniff this
+// shares with CompleteWithModel can't misfire on their JSON responses
+// either, so there's no reason to keep them without it now that the
+// bounded-read path is shared code anyway.
 func (c *CostguardClient) CompleteWithModel(ctx context.Context, model, prompt string) (string, error) {
 	reqBody := chatCompletionRequest{
 		Model:       model,
@@ -266,16 +221,12 @@ func (c *CostguardClient) CompleteWithModel(ctx context.Context, model, prompt s
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(resp, c.maxResponseBytes())
 	if err != nil {
-		return "", fmt.Errorf("read costguard response: %w", err)
-	}
-	respBody, err = maybeDecompressGzip(respBody, resp.Header.Get("Content-Encoding"))
-	if err != nil {
-		return "", fmt.Errorf("decompress costguard response: %w", err)
+		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("costguard returned status %d: %s", resp.StatusCode, respBody)
+		return "", fmt.Errorf("costguard returned an error (%s)", summarizeResponse(resp, respBody))
 	}
 
 	var parsed chatCompletionResponse

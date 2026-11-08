@@ -348,3 +348,125 @@ func TestTranscribe_AlreadyCancelledContextSkipsRetryEntirely(t *testing.T) {
 		t.Errorf("expected exactly 1 request (no retry sent), got %d", got)
 	}
 }
+
+// --- Response-content-leak fix: Transcribe (requirements 12, 13, 14) ---
+
+// TestTranscribe_NonOKStatusDoesNotLeakBody covers requirement 12/13 for
+// Transcribe: a non-200 body (plain text, a JSON error envelope, and a
+// gzip-compressed variant of each) must never put its content — in
+// particular error.message, which can echo request detail — into
+// TranscriptionStatusError's Error() text, while error.type/error.code
+// must still surface. Also confirms errors.As(err, *TranscriptionStatusError)
+// still works through this (requirement 14) — Transcribe's own 502-retry
+// logic and the voice pipeline's caller both depend on it.
+func TestTranscribe_NonOKStatusDoesNotLeakBody(t *testing.T) {
+	t.Run("plain text body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(leakSecret))
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		_, err := client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		var statusErr *TranscriptionStatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("expected errors.As(err, *TranscriptionStatusError), got: %v", err)
+		}
+		if statusErr.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected StatusCode %d, got %d", http.StatusBadRequest, statusErr.StatusCode)
+		}
+		if strings.Contains(err.Error(), leakSecret) {
+			t.Errorf("expected the plain-text body never to appear in the error, got: %v", err)
+		}
+	})
+
+	t.Run("JSON error envelope: message never leaks, type/code do", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": leakSecret,
+					"type":    "invalid_request_error",
+					"code":    "bad_audio",
+				},
+			})
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		_, err := client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if strings.Contains(err.Error(), leakSecret) {
+			t.Errorf("expected error.message never to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "invalid_request_error") {
+			t.Errorf("expected error.type to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "bad_audio") {
+			t.Errorf("expected error.code to appear in the error, got: %v", err)
+		}
+	})
+
+	t.Run("gzip-compressed JSON error envelope", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{
+			"error": map[string]any{"message": leakSecret, "type": "invalid_request_error"},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		compressed := gzipCompress(t, body)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(compressed)
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		client.HTTPClient = &http.Client{Transport: &http.Transport{DisableCompression: true}}
+
+		_, err = client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if strings.Contains(err.Error(), leakSecret) {
+			t.Errorf("expected the decompressed error.message never to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "invalid_request_error") {
+			t.Errorf("expected error.type to appear in the error, got: %v", err)
+		}
+	})
+}
+
+// TestTranscribe_InvalidJSONOn200DoesNotLeakBody covers the exact bug
+// this fix closes in Transcribe specifically: a 200 response whose body
+// isn't valid JSON (e.g. Costguard/Speaches itself glitching and
+// returning something unparseable) used to append a 500-char raw excerpt
+// of that body — which, for a 200 response specifically, IS the
+// transcript text — straight into the parse-error message via
+// "(body: %s)". It must not anymore.
+func TestTranscribe_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(leakSecret)) // not valid JSON
+	}))
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	_, err := client.Transcribe(context.Background(), []byte("audio"), "note.ogg", TranscribeOptions{})
+	if err == nil {
+		t.Fatal("expected a parse error, got nil")
+	}
+	if strings.Contains(err.Error(), leakSecret) {
+		t.Errorf("expected the unparseable 200 body never to appear in the error, got: %v", err)
+	}
+}
