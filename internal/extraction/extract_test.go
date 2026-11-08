@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +47,43 @@ func TestExtractor_ExtractWindow_EndToEnd(t *testing.T) {
 	}
 	if len(rejections) != 1 {
 		t.Errorf("expected the \"hates\" triple to be rejected and logged, got %d rejections", len(rejections))
+	}
+}
+
+// TestExtractor_ExtractWindow_MalformedOutputDoesNotLeakContent covers
+// requirement 15: when the model ignores §8.2's "JSON array only"
+// instruction and returns garbage instead, the garbage can legitimately
+// contain fragments of real, private conversation content (the model
+// echoing back something from the prompt, a hallucinated restatement,
+// etc.) — ExtractWindow's returned error must never embed it.
+// ParseModelOutput's own error already doesn't (its json.Unmarshal
+// failure is position/type information only, never the input bytes —
+// see its own doc comment); this is the end-to-end regression guard
+// confirming that holds through ExtractWindow's own wrapping too.
+func TestExtractor_ExtractWindow_MalformedOutputDoesNotLeakContent(t *testing.T) {
+	secret := "the user's password is hunter2, SSN 078-05-1120"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []struct {
+				Message chatMessage `json:"message"`
+			}{
+				{Message: chatMessage{Content: "sorry, I can't help with that — " + secret}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewExtractor(NewCostguardClient(server.URL))
+	window := Window{Messages: []WindowMessage{{Speaker: "Marco", Timestamp: time.Now(), Text: "hi"}}}
+
+	_, err := extractor.ExtractWindow(context.Background(), window)
+	if err == nil {
+		t.Fatal("expected a parse error for malformed (non-JSON-array) model output, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("expected the malformed model output never to appear in the returned error, got: %v", err)
 	}
 }
 

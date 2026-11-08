@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,6 +82,141 @@ func TestCostguardClient_Complete_NoChoices(t *testing.T) {
 	_, err := client.Complete(context.Background(), "test")
 	if err == nil {
 		t.Fatal("expected an error when the response has no choices, got nil")
+	}
+}
+
+// --- Response-content-leak fix: Complete/CompleteWithModel (requirements
+// 12, 13) ---
+
+const leakSecret = "the prompt said: my social security number is 078-05-1120"
+
+// TestCompleteWithModel_NonOKStatusLeaksNeitherPlainTextNorErrorMessage
+// covers requirement 12: a non-200 body can be either the standard
+// {"error":{"message":...}} envelope OR arbitrary plain text (both real
+// shapes different providers/gateways return) — either way, the secret
+// must never reach the returned error, while error.type/error.code (when
+// present) must (requirement 13).
+func TestCompleteWithModel_NonOKStatusLeaksNeitherPlainTextNorErrorMessage(t *testing.T) {
+	t.Run("plain text body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(leakSecret))
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		_, err := client.CompleteWithModel(context.Background(), "some-model", "test")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if strings.Contains(err.Error(), leakSecret) {
+			t.Errorf("expected the plain-text body never to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "400") {
+			t.Errorf("expected the status code in the error, got: %v", err)
+		}
+	})
+
+	t.Run("JSON error envelope: message never leaks, type/code do", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": leakSecret,
+					"type":    "invalid_request_error",
+					"code":    "bad_prompt",
+				},
+			})
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		_, err := client.CompleteWithModel(context.Background(), "some-model", "test")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if strings.Contains(err.Error(), leakSecret) {
+			t.Errorf("expected error.message never to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "invalid_request_error") {
+			t.Errorf("expected error.type to appear in the error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "bad_prompt") {
+			t.Errorf("expected error.code to appear in the error, got: %v", err)
+		}
+	})
+}
+
+// TestCompleteWithModel_InvalidJSONOn200DoesNotLeakBody covers
+// requirement 12's second half: a 200 response whose body fails to
+// parse as the expected shape (e.g. a gateway returning a plain-text
+// error page with a 200, or truncated JSON) must not leak that body
+// either — this is CompleteWithModel's own json.Unmarshal failure path,
+// which (unlike Transcribe's former "(body: %s)" bug) never embedded the
+// body to begin with; this test is the regression guard confirming that
+// stays true.
+func TestCompleteWithModel_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(leakSecret)) // not valid JSON
+	}))
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	_, err := client.CompleteWithModel(context.Background(), "some-model", "test")
+	if err == nil {
+		t.Fatal("expected a parse error, got nil")
+	}
+	if strings.Contains(err.Error(), leakSecret) {
+		t.Errorf("expected the unparseable 200 body never to appear in the error, got: %v", err)
+	}
+}
+
+// --- Response-content-leak fix: Embed (requirements 12, 13) ---
+
+func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": leakSecret,
+				"type":    "invalid_request_error",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	_, err := client.Embed(context.Background(), "text to embed")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if strings.Contains(err.Error(), leakSecret) {
+		t.Errorf("expected error.message never to appear in the error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_request_error") {
+		t.Errorf("expected error.type to appear in the error, got: %v", err)
+	}
+}
+
+func TestEmbed_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(leakSecret))
+	}))
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	_, err := client.Embed(context.Background(), "text to embed")
+	if err == nil {
+		t.Fatal("expected a parse error, got nil")
+	}
+	if strings.Contains(err.Error(), leakSecret) {
+		t.Errorf("expected the unparseable 200 body never to appear in the error, got: %v", err)
 	}
 }
 
@@ -196,15 +332,24 @@ func TestCostguardClient_CompleteWithModel_UncompressedResponseStillWorks(t *tes
 	}
 }
 
-// TestCostguardClient_CompleteWithModel_GzipErrorBodyStillReadable covers
-// maybeDecompressGzip running BEFORE the status-code check: a
-// gzip-compressed non-200 error body must still surface as a readable
-// error message, not raw compressed bytes dumped into the error string.
-func TestCostguardClient_CompleteWithModel_GzipErrorBodyStillReadable(t *testing.T) {
+// TestCostguardClient_CompleteWithModel_GzipErrorBodyDecompressedButNotLeaked
+// covers maybeDecompressGzip running BEFORE the status-code check,
+// updated for the response-content-leak fix: decompression must still
+// happen for a non-200 body (so BodyLength/the hash in the error summary
+// describe the real, decompressed content, not useless compressed
+// bytes), but the decompressed TEXT itself must never appear in the
+// error message — only its length and hash. Before this fix this test
+// asserted the OPPOSITE (that the literal error text DID appear in the
+// error message); that was exactly the leak this fix closes, not a
+// behavior to preserve.
+func TestCostguardClient_CompleteWithModel_GzipErrorBodyDecompressedButNotLeaked(t *testing.T) {
+	secret := "upstream provider unavailable: request contained 'the secret passphrase is orca47'"
+	compressed := gzipCompress(t, []byte(secret))
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write(gzipCompress(t, []byte("upstream provider unavailable")))
+		w.Write(compressed)
 	}))
 	defer server.Close()
 
@@ -215,8 +360,14 @@ func TestCostguardClient_CompleteWithModel_GzipErrorBodyStillReadable(t *testing
 	if err == nil {
 		t.Fatal("expected an error for a non-200 response, got nil")
 	}
-	if !strings.Contains(err.Error(), "upstream provider unavailable") {
-		t.Errorf("expected the decompressed error body in the error message, got: %v", err)
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "orca47") {
+		t.Errorf("expected the decompressed error body's TEXT never to appear in the error message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("expected the status code in the error message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("length=%d", len(secret))) {
+		t.Errorf("expected the DECOMPRESSED body length (%d) in the error message, got: %v", len(secret), err)
 	}
 }
 
@@ -226,9 +377,10 @@ func TestCostguardClient_CompleteWithModel_GzipErrorBodyStillReadable(t *testing
 func TestMaybeDecompressGzip(t *testing.T) {
 	plain := []byte(`{"hello":"world"}`)
 	compressed := gzipCompress(t, plain)
+	const limit = 1 << 20 // generous — these tests are about the gzip logic, not the size limit
 
 	t.Run("header says gzip, valid gzip body", func(t *testing.T) {
-		got, err := maybeDecompressGzip(compressed, "gzip")
+		got, err := maybeDecompressGzip(compressed, "gzip", limit)
 		if err != nil {
 			t.Fatalf("maybeDecompressGzip: %v", err)
 		}
@@ -238,7 +390,7 @@ func TestMaybeDecompressGzip(t *testing.T) {
 	})
 
 	t.Run("no header, magic bytes present", func(t *testing.T) {
-		got, err := maybeDecompressGzip(compressed, "")
+		got, err := maybeDecompressGzip(compressed, "", limit)
 		if err != nil {
 			t.Fatalf("maybeDecompressGzip: %v", err)
 		}
@@ -248,7 +400,7 @@ func TestMaybeDecompressGzip(t *testing.T) {
 	})
 
 	t.Run("no header, no magic bytes: passed through unchanged", func(t *testing.T) {
-		got, err := maybeDecompressGzip(plain, "")
+		got, err := maybeDecompressGzip(plain, "", limit)
 		if err != nil {
 			t.Fatalf("maybeDecompressGzip: %v", err)
 		}
@@ -258,14 +410,14 @@ func TestMaybeDecompressGzip(t *testing.T) {
 	})
 
 	t.Run("header claims gzip but body is not valid gzip: errors", func(t *testing.T) {
-		_, err := maybeDecompressGzip(plain, "gzip")
+		_, err := maybeDecompressGzip(plain, "gzip", limit)
 		if err == nil {
 			t.Fatal("expected an error for a Content-Encoding: gzip response whose body isn't actually gzip")
 		}
 	})
 
 	t.Run("Content-Encoding header value is case-insensitive", func(t *testing.T) {
-		got, err := maybeDecompressGzip(compressed, "GZIP")
+		got, err := maybeDecompressGzip(compressed, "GZIP", limit)
 		if err != nil {
 			t.Fatalf("maybeDecompressGzip: %v", err)
 		}
