@@ -3,11 +3,13 @@ package extraction
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,5 +214,137 @@ func TestTranscribe_FailsAfterRetryStillReturns502(t *testing.T) {
 	}
 	if atomic.LoadInt32(&requestCount) != 2 {
 		t.Errorf("expected exactly 2 requests (1 initial + 1 retry, no further retries), got %d", requestCount)
+	}
+}
+
+// --- Retry backoff respects ctx cancellation (the fix this issue is
+// about: a cancelled/timed-out ctx used to still block for the full
+// backoff and then issue the retry anyway) ---
+
+// always502Server returns a handler that always responds 502, signaling
+// firstRequestArrived once the first request has actually arrived at
+// the server (before responding) — lets a test cancel/time out the
+// caller's ctx WHILE Transcribe is in its post-502 backoff wait, not
+// before the first request was even sent.
+func always502Server(t *testing.T, requestCount *int32, firstRequestArrived chan struct{}) *httptest.Server {
+	t.Helper()
+	var signaled sync.Once
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(requestCount, 1)
+		signaled.Do(func() { close(firstRequestArrived) })
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("bad gateway — speaches container restarting"))
+	}))
+}
+
+// TestTranscribe_CancelledContextAbortsRetryWaitWithoutRetrying covers
+// requirement 6: a long backoff (1 hour — long enough that nothing
+// could possibly fire it for real within this test) and a ctx cancelled
+// ~50ms after the first request arrives must make Transcribe return
+// almost immediately with a wrapped context.Canceled, having sent
+// exactly ONE request — the retry must never go out once the caller has
+// given up.
+func TestTranscribe_CancelledContextAbortsRetryWaitWithoutRetrying(t *testing.T) {
+	var requestCount int32
+	firstRequestArrived := make(chan struct{})
+	server := always502Server(t, &requestCount, firstRequestArrived)
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	client.TranscriptionRetryBackoff = time.Hour // long enough that only ctx cancellation could end the wait
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-firstRequestArrived
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := client.Transcribe(ctx, []byte("audio"), "note.ogg", TranscribeOptions{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when ctx is cancelled during the retry backoff, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled) through Transcribe's wrapping, got: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("expected Transcribe to return almost immediately after cancellation, took %s", elapsed)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("expected exactly 1 request (the retry must not be sent after cancellation), got %d", got)
+	}
+}
+
+// TestTranscribe_DeadlineExceededAbortsRetryWaitWithoutRetrying is the
+// context.DeadlineExceeded counterpart of the cancellation test above —
+// requirement 7.
+func TestTranscribe_DeadlineExceededAbortsRetryWaitWithoutRetrying(t *testing.T) {
+	var requestCount int32
+	firstRequestArrived := make(chan struct{})
+	server := always502Server(t, &requestCount, firstRequestArrived)
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	client.TranscriptionRetryBackoff = time.Hour
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := client.Transcribe(ctx, []byte("audio"), "note.ogg", TranscribeOptions{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when ctx's deadline is exceeded during the retry backoff, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected errors.Is(err, context.DeadlineExceeded) through Transcribe's wrapping, got: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("expected Transcribe to return almost immediately after the deadline, took %s", elapsed)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("expected exactly 1 request (the retry must not be sent after the deadline), got %d", got)
+	}
+}
+
+// TestTranscribe_AlreadyCancelledContextSkipsRetryEntirely covers
+// requirement 8: ctx cancelled BEFORE the backoff wait even begins
+// (synchronously, inside the handler, before the 502 response is even
+// returned to the client) must still skip the retry — the select's
+// ctx.Done() branch firing on an already-closed channel, not just an
+// eventually-closed one.
+func TestTranscribe_AlreadyCancelledContextSkipsRetryEntirely(t *testing.T) {
+	var requestCount int32
+	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		cancel() // ctx is already done by the time Transcribe reaches its backoff select
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("bad gateway"))
+	}))
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	client.TranscriptionRetryBackoff = time.Hour
+
+	start := time.Now()
+	_, err := client.Transcribe(ctx, []byte("audio"), "note.ogg", TranscribeOptions{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled), got: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("expected Transcribe to return almost immediately, took %s", elapsed)
+	}
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Errorf("expected exactly 1 request (no retry sent), got %d", got)
 	}
 }
