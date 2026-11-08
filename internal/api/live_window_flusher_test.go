@@ -73,15 +73,81 @@ func liveWindowExists(a *API, conversationID uuid.UUID) bool {
 	return exists
 }
 
-func sendLiveMessage(t *testing.T, ctx context.Context, a *API, conversationExternalID, senderExternalID string, ts time.Time) {
+// sendLiveMessage sends one message through the live path and returns its
+// external_id, so a test can later look up that exact row's processed flag
+// (conversation-wide checks don't work once a conversation can hold a mix
+// of flushed-and-processed and still-pending messages at once).
+func sendLiveMessage(t *testing.T, ctx context.Context, a *API, conversationExternalID, senderExternalID string, ts time.Time) string {
 	t.Helper()
+	externalID := "msg-" + uuid.New().String()
 	raw := ingestion.RawMessage{
-		ExternalID: "msg-" + uuid.New().String(), Platform: "whatsapp",
+		ExternalID: externalID, Platform: "whatsapp",
 		ConversationID: conversationExternalID, SenderExternalID: senderExternalID,
 		Timestamp: ts, MediaType: ingestion.MediaTypeText, Text: textPtr("message"),
 	}
 	if err := a.ProcessLiveMessage(ctx, raw); err != nil {
 		t.Fatalf("ProcessLiveMessage: %v", err)
+	}
+	return externalID
+}
+
+// messageProcessed looks up a single message's processed flag by its
+// external_id.
+func messageProcessed(t *testing.T, ctx context.Context, ts *testStores, externalID string) bool {
+	t.Helper()
+	var processed bool
+	if err := ts.pool.QueryRow(ctx, `SELECT processed FROM messages WHERE external_id = $1`, externalID).Scan(&processed); err != nil {
+		t.Fatalf("query processed for external_id=%s: %v", externalID, err)
+	}
+	return processed
+}
+
+// conversationProcessedState reports whether every message currently
+// stored for conversationID has processed=true, and how many rows exist.
+func conversationProcessedState(ctx context.Context, ts *testStores, conversationID uuid.UUID) (allProcessed bool, count int, err error) {
+	rows, err := ts.pool.Query(ctx, `SELECT processed FROM messages WHERE conversation_id = $1`, conversationID)
+	if err != nil {
+		return false, 0, err
+	}
+	defer rows.Close()
+	allProcessed = true
+	for rows.Next() {
+		var p bool
+		if err := rows.Scan(&p); err != nil {
+			return false, 0, err
+		}
+		count++
+		if !p {
+			allProcessed = false
+		}
+	}
+	return allProcessed, count, rows.Err()
+}
+
+// waitForAllProcessed polls until every message in conversationID has
+// processed=true. Needed anywhere a goroutine-driven flush (the real
+// StartLiveWindowFlusher, its shutdown path) is involved: a signaling
+// extractor's channel send happens mid-pipeline (inside ExtractWindow),
+// strictly BEFORE storeExtractedTriples/MarkProcessed run, so receiving
+// from that channel is not proof the write has landed yet — asserting on
+// the database immediately after would race the background goroutine
+// that's still writing to it (and, worse, race the test's own
+// t.Cleanup-scheduled pool.Close once the test function returns).
+func waitForAllProcessed(t *testing.T, ctx context.Context, ts *testStores, conversationID uuid.UUID, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		done, n, err := conversationProcessedState(ctx, ts, conversationID)
+		if err != nil {
+			t.Fatalf("query processed flags: %v", err)
+		}
+		if n > 0 && done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for every message in conversation %s to be processed", conversationID)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -404,6 +470,9 @@ func TestStartLiveWindowFlusher_FlushesViaRealGoroutine(t *testing.T) {
 	if extractor.callCount() != 1 {
 		t.Errorf("expected exactly 1 flush, got %d", extractor.callCount())
 	}
+
+	conversationID := resolveConversationID("whatsapp", conversationExternalID)
+	waitForAllProcessed(t, ctx, ts, conversationID, 2*time.Second)
 }
 
 // TestStartLiveWindowFlusher_ShutdownFlushesAllOpenWindows covers
@@ -451,8 +520,8 @@ func TestStartLiveWindowFlusher_ShutdownFlushesAllOpenWindows(t *testing.T) {
 
 	convAID := resolveConversationID("whatsapp", convAExternal)
 	convBID := resolveConversationID("whatsapp", convBExternal)
-	assertProcessedFlags(t, ctx, ts, convAID, true)
-	assertProcessedFlags(t, ctx, ts, convBID, true)
+	waitForAllProcessed(t, ctx, ts, convAID, 2*time.Second)
+	waitForAllProcessed(t, ctx, ts, convBID, 2*time.Second)
 }
 
 // TestFlushIdleWindows_ConcurrentArrivalDuringFlush covers requirement
@@ -483,8 +552,8 @@ func TestFlushIdleWindows_ConcurrentArrivalDuringFlush(t *testing.T) {
 	senderExternalID := "concurrent-flush-sender-" + uuid.New().String()
 	conversationID := resolveConversationID("whatsapp", conversationExternalID)
 
-	sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
-	sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
+	oldExternalID1 := sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
+	oldExternalID2 := sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
 	clock.Advance(6 * time.Minute)
 
 	flushDone := make(chan error, 1)
@@ -492,18 +561,47 @@ func TestFlushIdleWindows_ConcurrentArrivalDuringFlush(t *testing.T) {
 
 	// Wait until the flush's extraction call has actually started
 	// (blocking on release) before sending the concurrent message — this
-	// is the window during which the old map entry is already gone but
-	// its extraction hasn't finished.
+	// is the window during which the old map entry is already gone (per
+	// collectWindowsToFlush's own discipline: delete-then-release-lock)
+	// but the old window's extraction hasn't finished.
 	blocking.waitForCall(t, 2*time.Second)
 
-	sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
+	// Lost or double-processed are the two failure modes requirement 17
+	// rules out. Neither is possible here by construction: the old map
+	// entry is already gone, so this call can only start a brand-new,
+	// independent window for the conversation — it can't be merged into
+	// the in-flight flush, and it can't be dropped either.
+	newExternalID := sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now())
 
 	close(release)
 	if err := <-flushDone; err != nil {
 		t.Fatalf("FlushIdleWindows: %v", err)
 	}
 
-	assertProcessedFlags(t, ctx, ts, conversationID, false) // the OLD 2 messages are now processed=true... see below
+	if !messageProcessed(t, ctx, ts, oldExternalID1) {
+		t.Error("expected the first old message processed=true once the in-flight flush completed")
+	}
+	if !messageProcessed(t, ctx, ts, oldExternalID2) {
+		t.Error("expected the second old message processed=true once the in-flight flush completed")
+	}
+	if messageProcessed(t, ctx, ts, newExternalID) {
+		t.Error("expected the concurrently-arrived message to remain processed=false — it started a new, still-open window, not part of the window being flushed")
+	}
+	if !liveWindowExists(a, conversationID) {
+		t.Error("expected a new open window for the conversation, started by the concurrently-arrived message")
+	}
+	if blocking.callCount() != 1 {
+		t.Errorf("expected exactly 1 extraction call — the concurrently-arrived message's own window must not have been flushed too, got %d", blocking.callCount())
+	}
+
+	subject, err := ts.entities.GetByCanonicalName(ctx, "Concurrent Flush Contact")
+	if err != nil || subject == nil {
+		t.Fatalf("subject entity not found: err=%v", err)
+	}
+	edges, err := ts.edges.GetBySubjectAndPredicate(ctx, subject.ID, "likes")
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("expected exactly 1 edge (not double-processed), got %d (err=%v)", len(edges), err)
+	}
 }
 
 // blockingExtractor blocks inside ExtractWindow until release is closed
@@ -528,6 +626,12 @@ func (f *blockingExtractor) ExtractWindow(ctx context.Context, w extraction.Wind
 	f.mu.Unlock()
 	<-f.release
 	return f.triples, nil
+}
+
+func (f *blockingExtractor) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func (f *blockingExtractor) waitForCall(t *testing.T, timeout time.Duration) {
