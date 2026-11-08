@@ -328,6 +328,80 @@ func (s *MessageStore) CountByConversationSince(ctx context.Context, since time.
 	return counts, rows.Err()
 }
 
+// CountByConversationAndSenderSince returns the message count per
+// (conversation_id, sender_id) pair, restricted to messages at or after
+// since — the group-chat-attribution fix's own per-(conversation,
+// sender) grouped query (one query, not one per contact — see
+// reflection.RecomputeRelationshipStats' own doc comment on why that
+// matters once a group conversation can have more than two senders):
+// CountByConversationSince's total-per-conversation count can't tell a
+// group's members' activity apart from each other or from Marco's own,
+// which group-chat frequency attribution (§10 rule C) needs.
+func (s *MessageStore) CountByConversationAndSenderSince(ctx context.Context, since time.Time) (map[uuid.UUID]map[uuid.UUID]int, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT conversation_id, sender_id, count(*) FROM messages
+		WHERE timestamp >= $1
+		GROUP BY conversation_id, sender_id
+	`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[uuid.UUID]map[uuid.UUID]int)
+	for rows.Next() {
+		var conversationID, senderID uuid.UUID
+		var n int
+		if err := rows.Scan(&conversationID, &senderID, &n); err != nil {
+			return nil, err
+		}
+		if counts[conversationID] == nil {
+			counts[conversationID] = make(map[uuid.UUID]int)
+		}
+		counts[conversationID][senderID] = n
+	}
+
+	return counts, rows.Err()
+}
+
+// DistinctSendersByConversation returns, for each conversation_id in
+// conversationIDs, the set of every sender_id that has EVER sent a
+// message in it — deliberately unwindowed (see
+// reflection.RecomputeRelationshipStats' group-detection rule): whether a
+// conversation is a group chat is a property of who has ever
+// participated in it, not of who happened to speak in one particular
+// trailing window, so a group that's gone quiet doesn't flip back to
+// looking like a 1:1 just because this window is sparse. Returns an
+// empty map, not an error, for an empty conversationIDs.
+func (s *MessageStore) DistinctSendersByConversation(ctx context.Context, conversationIDs []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]bool, error) {
+	senders := make(map[uuid.UUID]map[uuid.UUID]bool)
+	if len(conversationIDs) == 0 {
+		return senders, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT conversation_id, sender_id FROM messages
+		WHERE conversation_id = ANY($1)
+	`, conversationIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var conversationID, senderID uuid.UUID
+		if err := rows.Scan(&conversationID, &senderID); err != nil {
+			return nil, err
+		}
+		if senders[conversationID] == nil {
+			senders[conversationID] = make(map[uuid.UUID]bool)
+		}
+		senders[conversationID][senderID] = true
+	}
+
+	return senders, rows.Err()
+}
+
 // ListWithoutEmbeddings returns every message with no matching row in
 // embeddings — the query cmd/backfill_embeddings needs to find messages
 // written before embedding generation was wired into the write pipeline
@@ -472,6 +546,32 @@ func (s *MessageStore) LastMessageTime(ctx context.Context, conversationIDs []uu
 	if err := s.db.QueryRow(ctx, `
 		SELECT max(timestamp) FROM messages WHERE conversation_id = ANY($1)
 	`, conversationIDs).Scan(&t); err != nil {
+		return time.Time{}, err
+	}
+	if t == nil {
+		return time.Time{}, nil
+	}
+
+	return *t, nil
+}
+
+// LastMessageTimeBySender is LastMessageTime restricted to one sender —
+// the group-chat-attribution fix's own recency rule (§10 rule E): in a
+// group conversation, a member's recency must come from THEIR OWN last
+// message in it, not whoever in the group spoke most recently (that
+// would credit a silent member with the group's general activity, the
+// same misattribution this whole fix addresses for frequency and
+// reply_speed). Returns the zero time, not an error, for an empty
+// conversationIDs.
+func (s *MessageStore) LastMessageTimeBySender(ctx context.Context, senderID uuid.UUID, conversationIDs []uuid.UUID) (time.Time, error) {
+	if len(conversationIDs) == 0 {
+		return time.Time{}, nil
+	}
+
+	var t *time.Time
+	if err := s.db.QueryRow(ctx, `
+		SELECT max(timestamp) FROM messages WHERE sender_id = $1 AND conversation_id = ANY($2)
+	`, senderID, conversationIDs).Scan(&t); err != nil {
 		return time.Time{}, err
 	}
 	if t == nil {
