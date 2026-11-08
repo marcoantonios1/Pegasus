@@ -15,11 +15,11 @@ func floatsClose(a, b, epsilon float64) bool {
 	return math.Abs(a-b) <= epsilon
 }
 
-// futureTestOffset anchors a test's synthetic "now" far in the future
-// (over a year out) rather than at the real wall-clock time.Now(),
-// purely so the exact-hand-computed-value tests for rule F's
-// cross-contact mean (TestRecomputeRelationshipStats_GroupChat and its
-// siblings below) don't collide with this suite's own shared,
+// futureTestOffset* anchor each test's synthetic "now" far in the
+// future (over a year out) rather than at the real wall-clock
+// time.Now(), purely so the exact-hand-computed-value tests for rule
+// F's cross-contact mean (TestRecomputeRelationshipStats_GroupChat and
+// its siblings below) don't collide with this suite's own shared,
 // never-reset dev database: rule F's mean is explicitly computed over
 // EVERY contact with any activity in the trailing
 // DefaultRelationshipStatsWindow, globally, by design (not scoped to one
@@ -31,12 +31,24 @@ func floatsClose(a, b, epsilon float64) bool {
 // without needing to scope or mock the query itself: nothing else in
 // this database has ever been written with a future timestamp, so a
 // window computed from a future "now" is guaranteed to contain only
-// this test's own messages. Confirmed safe to do this way: MessageStore.
-// Create has no future-timestamp clamp (that only exists in internal/
-// api's write pipeline, for edges' FirstSeen/LastReinforced — see
+// this test's own messages — AS LONG AS each such test uses a
+// DIFFERENTLY-OFFSET future anchor from every other one (confirmed
+// necessary, not just defensive: an earlier version of these tests all
+// used the SAME future offset and polluted EACH OTHER's populations the
+// exact same way real contemporaneous tests would have). Each constant
+// here is spaced more than DefaultRelationshipStatsWindow (28 days)
+// apart from its neighbors, so their trailing windows can never overlap.
+// Confirmed safe to use future timestamps at all: MessageStore.Create
+// has no future-timestamp clamp (that only exists in internal/api's
+// write pipeline, for edges' FirstSeen/LastReinforced — see
 // clampFutureTimestamp's own doc comment — and these tests write
 // messages directly via msgStore.Create, never through that pipeline).
-const futureTestOffset = 400 * 24 * time.Hour
+const (
+	futureTestOffsetGroupChat       = 400 * 24 * time.Hour
+	futureTestOffsetMixed           = 470 * 24 * time.Hour
+	futureTestOffsetHighVolume      = 540 * 24 * time.Hour
+	futureTestOffsetAllTimeClassify = 610 * 24 * time.Hour
+)
 
 // --- Requirement 7: unit tests for each formula component in isolation ---
 
@@ -56,7 +68,7 @@ func TestComputeFrequency(t *testing.T) {
 		moderateConv := uuid.New()
 
 		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
-			closeConv:    {self: 20, closeContact: 20}, // total 40
+			closeConv:    {self: 20, closeContact: 20},  // total 40
 			moderateConv: {self: 4, moderateContact: 4}, // total 8
 		}
 		isGroup := map[uuid.UUID]bool{closeConv: false, moderateConv: false}
@@ -143,7 +155,7 @@ func TestComputeFrequency(t *testing.T) {
 		groupConv := uuid.New()
 
 		perConvSenderCounts := map[uuid.UUID]map[uuid.UUID]int{
-			dmConv:    {self: 6, david: 6},         // total 12
+			dmConv:    {self: 6, david: 6},          // total 12
 			groupConv: {self: 10, david: 8, eve: 4}, // david's own group count: 8, eve's: 4
 		}
 		isGroup := map[uuid.UUID]bool{dmConv: false, groupConv: true}
@@ -279,12 +291,12 @@ func TestReplyLatenciesSeconds_Group(t *testing.T) {
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	msgs := []*memory.Message{
-		{SenderID: bob, Timestamp: base},                                            // inbound from Bob
-		{SenderID: self, Timestamp: base.Add(5 * time.Minute)},                       // reply to Bob: latency 300s
-		{SenderID: alice, Timestamp: base.Add(6 * time.Minute)},                      // inbound from Alice — updates "most recent inbound"
-		{SenderID: self, Timestamp: base.Add(7 * time.Minute)},                       // reply to Alice: latency 60s
-		{SenderID: bob, Timestamp: base.Add(8 * time.Minute)},                        // inbound from Bob again
-		{SenderID: self, Timestamp: base.Add(8*time.Minute + 40*time.Minute)},        // reply to Bob, but 40min > the 30min cap -> excluded
+		{SenderID: bob, Timestamp: base},                                      // inbound from Bob
+		{SenderID: self, Timestamp: base.Add(5 * time.Minute)},                // reply to Bob: latency 300s
+		{SenderID: alice, Timestamp: base.Add(6 * time.Minute)},               // inbound from Alice — updates "most recent inbound"
+		{SenderID: self, Timestamp: base.Add(7 * time.Minute)},                // reply to Alice: latency 60s
+		{SenderID: bob, Timestamp: base.Add(8 * time.Minute)},                 // inbound from Bob again
+		{SenderID: self, Timestamp: base.Add(8*time.Minute + 40*time.Minute)}, // reply to Bob, but 40min > the 30min cap -> excluded
 	}
 
 	bobLatencies := replyLatenciesSeconds(self, bob, msgs, true)
@@ -592,7 +604,7 @@ func TestRecomputeRelationshipStats_GroupChat(t *testing.T) {
 	bob := createTestEntity(t, ctx, entityStore, "Group Chat Bob "+uuid.New().String())
 	carol := createTestEntity(t, ctx, entityStore, "Group Chat Carol "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffset) // see futureTestOffset's own doc comment
+	now := time.Now().Add(futureTestOffsetGroupChat) // see futureTestOffsetGroupChat's own doc comment
 	groupConv := uuid.New()
 
 	// Alice's only message: 30 days ago, outside the 28-day window.
@@ -678,7 +690,7 @@ func TestRecomputeRelationshipStats_MixedOneOnOneAndGroup(t *testing.T) {
 	david := createTestEntity(t, ctx, entityStore, "Mixed David "+uuid.New().String())
 	eve := createTestEntity(t, ctx, entityStore, "Mixed Eve "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffset) // see futureTestOffset's own doc comment
+	now := time.Now().Add(futureTestOffsetMixed) // see futureTestOffsetMixed's own doc comment
 
 	// David's 1:1 DM: 6 messages each direction (total 12), all within
 	// the window.
@@ -735,7 +747,7 @@ func TestRecomputeRelationshipStats_HighVolumeGroupNotMember(t *testing.T) {
 	grace := createTestEntity(t, ctx, entityStore, "HighVol Grace "+uuid.New().String())
 	henry := createTestEntity(t, ctx, entityStore, "HighVol Henry "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffset) // see futureTestOffset's own doc comment
+	now := time.Now().Add(futureTestOffsetHighVolume) // see futureTestOffsetHighVolume's own doc comment
 
 	// Frank: an ordinary 1:1 DM, total window count 20.
 	frankConv := uuid.New()
@@ -794,7 +806,7 @@ func TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow(t *testing
 	bob := createTestEntity(t, ctx, entityStore, "AllTime Bob "+uuid.New().String())
 	zoe := createTestEntity(t, ctx, entityStore, "AllTime Zoe "+uuid.New().String())
 
-	now := time.Now().Add(futureTestOffset) // see futureTestOffset's own doc comment
+	now := time.Now().Add(futureTestOffsetAllTimeClassify) // see futureTestOffsetAllTimeClassify's own doc comment
 
 	groupConv := uuid.New()
 	// Bob's one message: 60 days ago, well outside the window — present
