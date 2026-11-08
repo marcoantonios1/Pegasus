@@ -27,6 +27,41 @@ func (f *failingExtractor) ExtractWindow(ctx context.Context, w extraction.Windo
 	return nil, f.err
 }
 
+// snapshotMine calls SnapshotUnprocessedLive (the real, unscoped query —
+// requirement 9's own split) and filters the result down to just the
+// external IDs this test cares about. Needed because this suite runs
+// against the same shared, never-reset dev database every other
+// DB-backed test in this repo uses (see this package's own testDB doc
+// comment): by the time these tests run, that table already carries a
+// large, uncontrolled backlog of unprocessed rows left by unrelated past
+// test runs. SnapshotUnprocessedLive's own contract is deliberately
+// global and unscoped (RecoverUnprocessedLive's doc comment: it cannot
+// even tell a live row from an interrupted import's row) — asserting
+// exact GLOBAL counts against it here would be asserting about those
+// unrelated leftover rows, not about anything this fix changed.
+// Filtering down to this test's own external IDs still exercises the
+// real query and the real windowing/flush logic end-to-end, just without
+// being at the mercy of however much unrelated junk happens to be
+// sitting in the table on a given run.
+func snapshotMine(t *testing.T, ctx context.Context, a *API, externalIDs ...string) []*memory.Message {
+	t.Helper()
+	want := make(map[string]bool, len(externalIDs))
+	for _, id := range externalIDs {
+		want[id] = true
+	}
+	all, err := a.SnapshotUnprocessedLive(ctx)
+	if err != nil {
+		t.Fatalf("SnapshotUnprocessedLive: %v", err)
+	}
+	var mine []*memory.Message
+	for _, m := range all {
+		if m.ExternalID != nil && want[*m.ExternalID] {
+			mine = append(mine, m)
+		}
+	}
+	return mine
+}
+
 // TestFlushIdleWindows_FailingExtractorThenRecovery covers requirement
 // 19: a flush whose extractor fails must leave the messages
 // processed=false (error logged, no in-process retry — requirement 6),
@@ -78,9 +113,13 @@ func TestFlushIdleWindows_FailingExtractorThenRecovery(t *testing.T) {
 	}}
 	a.WithPipeline(PipelineDeps{Triager: triager, Extractor: working, LiveWindowFlushAfter: 5 * time.Minute})
 
-	stats, err := a.RecoverUnprocessedLive(ctx)
+	mine := snapshotMine(t, ctx, a, externalID1, externalID2)
+	if len(mine) != 2 {
+		t.Fatalf("expected both messages in the unprocessed snapshot, got %d", len(mine))
+	}
+	stats, err := a.ProcessRecoveredMessages(ctx, mine)
 	if err != nil {
-		t.Fatalf("RecoverUnprocessedLive: %v", err)
+		t.Fatalf("ProcessRecoveredMessages: %v", err)
 	}
 	if stats.MessagesRecovered != 2 {
 		t.Errorf("expected 2 messages recovered, got %d", stats.MessagesRecovered)
@@ -205,9 +244,18 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 		t.Fatalf("create no-transcript voice message: %v", err)
 	}
 
-	stats, err := a.RecoverUnprocessedLive(ctx)
+	var wantExternalIDs []string
+	wantExternalIDs = append(wantExternalIDs, convAExternalIDs...)
+	wantExternalIDs = append(wantExternalIDs, convBExternalIDs...)
+
+	mine := snapshotMine(t, ctx, a, wantExternalIDs...)
+	if len(mine) != 14 {
+		t.Fatalf("expected 14 of our own messages in the unprocessed snapshot (12 in conversation A + 2 in conversation B) — the already-processed message, the processed image, and the no-transcript voice message must all be absent from it; got %d", len(mine))
+	}
+
+	stats, err := a.ProcessRecoveredMessages(ctx, mine)
 	if err != nil {
-		t.Fatalf("RecoverUnprocessedLive: %v", err)
+		t.Fatalf("ProcessRecoveredMessages: %v", err)
 	}
 
 	if stats.MessagesRecovered != 14 {
@@ -216,8 +264,15 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 	if stats.WindowsProcessed != 3 {
 		t.Errorf("expected 3 windows processed (2 for conversation A's 12 messages + 1 for conversation B's 2), got %d", stats.WindowsProcessed)
 	}
-	if stats.SkippedNoText != 1 {
-		t.Errorf("expected 1 message skipped for having no usable text, got %d", stats.SkippedNoText)
+	// SkippedNoText comes from CountUnprocessedWithoutText, which is
+	// deliberately unscoped (it answers "how many unprocessed rows have
+	// no text at all," globally — see RecoveryStats.SkippedNoText's own
+	// doc comment) — so it also counts whatever unrelated legacy rows
+	// this shared dev database already carries, not just our own
+	// no-transcript voice message. >=1 is what this test can actually
+	// promise: our own message is counted among them.
+	if stats.SkippedNoText < 1 {
+		t.Errorf("expected at least 1 message skipped for having no usable text (ours), got %d", stats.SkippedNoText)
 	}
 	if stats.Errors != 0 {
 		t.Errorf("expected 0 errors, got %d", stats.Errors)
@@ -254,8 +309,13 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBySubjectAndPredicate: %v", err)
 	}
-	if len(edges) != 3 {
-		t.Fatalf("expected exactly 3 edges (one per window processed), got %d", len(edges))
+	// All 3 windows produced the exact same (subject, predicate, object)
+	// triple (the fake extractor ignores window content) — FindMatchingEdge
+	// reinforces the same existing edge rather than creating a duplicate
+	// (the FindMatchingEdge/dedup-merge fixes this session's earlier
+	// issues already cover), so this is 1 edge, not 3.
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 edge (3 identical triples reinforcing the same edge), got %d", len(edges))
 	}
 
 	// A message that "arrives" (is written to the table) after the first
@@ -272,12 +332,17 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 		t.Fatalf("create late-arriving message: %v", err)
 	}
 
-	// Idempotency: a second call finds nothing from the FIRST batch (all
-	// already processed=true) — only the late-arriving message is new
-	// work.
-	stats2, err := a.RecoverUnprocessedLive(ctx)
+	// Idempotency: our own first batch no longer appears in the
+	// unprocessed snapshot at all (every one of those rows is now
+	// processed=true) — only the late-arriving message does.
+	mineAfter := snapshotMine(t, ctx, a, append(append([]string{}, wantExternalIDs...), lateExternalID)...)
+	if len(mineAfter) != 1 || mineAfter[0].ExternalID == nil || *mineAfter[0].ExternalID != lateExternalID {
+		t.Fatalf("expected only the late-arriving message left in the unprocessed snapshot, got %d message(s)", len(mineAfter))
+	}
+
+	stats2, err := a.ProcessRecoveredMessages(ctx, mineAfter)
 	if err != nil {
-		t.Fatalf("second RecoverUnprocessedLive: %v", err)
+		t.Fatalf("ProcessRecoveredMessages (late-arriving message): %v", err)
 	}
 	if stats2.MessagesRecovered != 1 {
 		t.Errorf("expected the second call to recover only the late-arriving message, got %d", stats2.MessagesRecovered)
@@ -289,13 +354,10 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 		t.Error("expected the late-arriving message processed=true after the second recovery call")
 	}
 
-	// A third call: truly nothing left anywhere.
-	stats3, err := a.RecoverUnprocessedLive(ctx)
-	if err != nil {
-		t.Fatalf("third RecoverUnprocessedLive: %v", err)
-	}
-	if stats3.MessagesRecovered != 0 || stats3.WindowsProcessed != 0 {
-		t.Errorf("expected the third call to be a complete no-op, got %+v", stats3)
+	// A third pass: truly nothing of ours left anywhere.
+	mineFinal := snapshotMine(t, ctx, a, append(append([]string{}, wantExternalIDs...), lateExternalID)...)
+	if len(mineFinal) != 0 {
+		t.Errorf("expected none of our messages left in the unprocessed snapshot, got %d", len(mineFinal))
 	}
 }
 
@@ -318,22 +380,29 @@ func TestRecoverUnprocessedLive_NeverCallsRecordActivity(t *testing.T) {
 	sender := createTestEntity(t, ctx, ts, "person", "Recovery No Activity Sender "+uuid.New().String())
 	convID := uuid.New()
 	base := time.Now().Add(-time.Hour)
+	var externalIDs []string
 	for i := 0; i < 3; i++ {
+		externalID := "recov-no-activity-" + uuid.New().String()
 		m := &memory.Message{
 			ConversationID: convID, SenderID: sender.ID, MediaType: ingestion.MediaTypeText,
 			RawText: textPtr("hello"), Timestamp: base.Add(time.Duration(i) * time.Second),
-			ExternalID: textPtr("recov-no-activity-" + uuid.New().String()),
+			ExternalID: &externalID,
 		}
 		if err := ts.messages.Create(ctx, m); err != nil {
 			t.Fatalf("create message %d: %v", i, err)
 		}
+		externalIDs = append(externalIDs, externalID)
 	}
 
-	if _, err := a.RecoverUnprocessedLive(ctx); err != nil {
-		t.Fatalf("RecoverUnprocessedLive: %v", err)
+	mine := snapshotMine(t, ctx, a, externalIDs...)
+	if len(mine) != 3 {
+		t.Fatalf("expected all 3 messages in the unprocessed snapshot, got %d", len(mine))
+	}
+	if _, err := a.ProcessRecoveredMessages(ctx, mine); err != nil {
+		t.Fatalf("ProcessRecoveredMessages: %v", err)
 	}
 
 	if recorder.calls != 0 {
-		t.Errorf("expected RecoverUnprocessedLive to never call RecordActivity, got %d calls", recorder.calls)
+		t.Errorf("expected recovery to never call RecordActivity, got %d calls", recorder.calls)
 	}
 }

@@ -269,7 +269,7 @@ func TestFlushIdleWindows_NewMessageResetsIdleClock(t *testing.T) {
 
 	sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now()) // t0
 
-	clock.Advance(4 * time.Minute) // t0+4min, still under threshold
+	clock.Advance(4 * time.Minute)                                                    // t0+4min, still under threshold
 	sendLiveMessage(t, ctx, a, conversationExternalID, senderExternalID, clock.Now()) // arrival resets lastArrival to t0+4min
 
 	clock.Advance(4 * time.Minute) // "now" = t0+8min: past the ORIGINAL t0+5min deadline, but only 4min since the reset
