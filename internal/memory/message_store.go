@@ -374,6 +374,87 @@ func (s *MessageStore) ListWithoutEmbeddings(ctx context.Context) ([]*Message, e
 	return msgs, rows.Err()
 }
 
+// hasUsableTextWhere is the "has embeddable text" condition ALONE (no
+// processed check — callers AND it with their own) — the same rule
+// api.messageText applies when deciding what to embed (raw_text if
+// present and non-empty, else transcript), duplicated here at the SQL
+// level rather than called from this package: messageText lives in
+// package api, which this package must not import (memory is the lower
+// layer api composes, per this codebase's established dependency
+// direction — see package api's own doc comment). Shared by
+// ListUnprocessedWithText and CountUnprocessedWithoutText specifically so
+// the two queries' notion of "has text" can't drift apart from each
+// other, even though messageText itself (a different package) isn't the
+// single source either query can literally call.
+const hasUsableTextWhere = `
+	(raw_text IS NOT NULL AND raw_text != '')
+	OR (transcript IS NOT NULL AND transcript != '')
+`
+
+// ListUnprocessedWithText returns every processed=false message that has
+// embeddable text (see unprocessedWithTextWhere), ordered by
+// (conversation_id, timestamp) — the live-window restart-recovery sweep's
+// own query (api.RecoverUnprocessedLive): these are exactly the messages
+// whose live window never got a chance to close (extraction.LiveWindower
+// never force-closes on its own — see the live-window idle-flush fix's
+// own history for why), re-windowable in the same chronological order
+// they actually arrived in.
+//
+// Checked for an existing equivalent first: ListWithoutEmbeddings (above)
+// answers a different question — "no embeddings row at all," regardless
+// of processed — and would also return plenty of ALREADY-processed
+// messages; nothing in this package already answers "unprocessed AND has
+// text."
+//
+// A message with processed=false and NO usable text (e.g. a voice note
+// whose transcription failed entirely) deliberately does NOT appear
+// here — see CountUnprocessedWithoutText for counting those instead, and
+// RecoverUnprocessedLive's own doc comment for why retrying their
+// transcription is out of scope.
+func (s *MessageStore) ListUnprocessedWithText(ctx context.Context) ([]*Message, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			id, conversation_id, sender_id, media_type, raw_text, transcript,
+			transcript_confidence, media_ref, processed, timestamp, external_id
+		FROM messages
+		WHERE processed = false AND (`+hasUsableTextWhere+`)
+		ORDER BY conversation_id, timestamp
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*Message
+	for rows.Next() {
+		var m Message
+
+		if err := rows.Scan(
+			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
+		); err != nil {
+			return nil, err
+		}
+
+		msgs = append(msgs, &m)
+	}
+
+	return msgs, rows.Err()
+}
+
+// CountUnprocessedWithoutText returns how many processed=false messages
+// have NO usable text — the complement of ListUnprocessedWithText's own
+// filter (hasUsableTextWhere), for api.RecoverUnprocessedLive's
+// RecoveryStats to report rather than silently skip.
+func (s *MessageStore) CountUnprocessedWithoutText(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*) FROM messages
+		WHERE processed = false AND NOT (`+hasUsableTextWhere+`)
+	`).Scan(&count)
+	return count, err
+}
+
 // LastMessageTime returns the most recent message timestamp across every
 // conversation in conversationIDs, or the zero time if none of them have
 // any messages (including when conversationIDs is empty). Deliberately

@@ -24,6 +24,21 @@ type liveConversationState struct {
 	windower          *extraction.LiveWindower
 	pendingIDs        []uuid.UUID
 	pendingMediaTypes []string
+
+	// lastArrival is when (wall-clock, a.now() — NOT the message's own
+	// Timestamp) the most recent message was added to this window — the
+	// live-window idle-flush fix's own tracking field (live_window_
+	// flusher.go's FlushIdleWindows reads it). Deliberately wall-clock
+	// arrival time, not message Timestamp: a history-sync burst can
+	// deliver a year's worth of old messages within seconds of each
+	// other, and windowing by THEIR timestamps already handles that
+	// correctly (extraction.LiveWindower.Add's own span rule) — but an
+	// idle-flush check keyed on message Timestamp would see every
+	// message in that burst as "ancient" the instant it arrives and
+	// flush the window mid-burst, fragmenting it. Idleness is about
+	// REAL time passing with nothing new arriving, which is a property
+	// of arrival time, not content time.
+	lastArrival time.Time
 }
 
 // windowSourceType derives the single source_type a whole window's worth
@@ -233,6 +248,10 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 	completed, ready := state.windower.Add(wm)
 	state.pendingIDs = append(state.pendingIDs, msg.ID)
 	state.pendingMediaTypes = append(state.pendingMediaTypes, rawMsg.MediaType)
+	// a.now(), not rawMsg.Timestamp — see lastArrival's own doc comment
+	// (liveConversationState) for why arrival time, not message time, is
+	// what idle-flush detection needs.
+	state.lastArrival = a.now()
 
 	var completedIDs []uuid.UUID
 	var completedMediaTypes []string

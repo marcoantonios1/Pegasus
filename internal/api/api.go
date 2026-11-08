@@ -26,6 +26,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -103,6 +104,23 @@ type API struct {
 
 	liveWindowsMu sync.Mutex
 	liveWindows   map[uuid.UUID]*liveConversationState
+
+	// liveWindowFlushAfter/liveWindowFlushPollInterval configure the
+	// idle-based live-window flusher (live_window_flusher.go). Stored
+	// exactly as given — possibly zero — and defaulted lazily at each
+	// use site (FlushIdleWindows/StartLiveWindowFlusher), the same
+	// pattern transcriptionConfig already uses (withDefaults() called at
+	// the point of use, not at WithPipeline time) rather than normalizing
+	// eagerly here.
+	liveWindowFlushAfter        time.Duration
+	liveWindowFlushPollInterval time.Duration
+
+	// now is swappable so tests can simulate elapsed wall-clock ARRIVAL
+	// time for the live-window idle flusher without real sleeps — the
+	// same technique reflection.Trigger's own now field uses (trigger.go/
+	// trigger_test.go's fakeClock). Defaults to time.Now in New(); see
+	// WithClock.
+	now func() time.Time
 }
 
 // New builds an API from its component stores plus an Embedder for
@@ -134,7 +152,19 @@ func New(
 		embeddings: embeddings,
 		relStats:   relStats,
 		embedder:   embedder,
+		now:        time.Now,
 	}
+}
+
+// WithClock overrides the API's now() clock — production code never
+// needs this (New already defaults it to time.Now); tests use it to
+// simulate elapsed wall-clock time for the live-window idle flusher
+// (live_window_flusher.go) without real sleeps. Returns the same *API
+// for chaining onto New/WithPipeline, matching WithPipeline's own
+// pattern.
+func (a *API) WithClock(now func() time.Time) *API {
+	a.now = now
+	return a
 }
 
 // PipelineDeps carries ProcessLiveMessage/ImportWhatsApp's dependencies —
@@ -200,6 +230,19 @@ type PipelineDeps struct {
 	// fact, correctable later (prompt.go). Marco can set this true if he
 	// accepts the residual forged-header risk for his own imports.
 	HonorCorrectionsOnImport bool
+
+	// LiveWindowFlushAfter/LiveWindowFlushPollInterval configure the
+	// idle-based live-window flusher (live_window_flusher.go): a
+	// conversation's open window is force-closed once no new message has
+	// ARRIVED (wall-clock, via the API's now()/WithClock — never message
+	// Timestamp, see FlushIdleWindows' own doc comment for why) for
+	// LiveWindowFlushAfter, checked every LiveWindowFlushPollInterval.
+	// Zero values fall back to DefaultLiveWindowFlushAfter/
+	// DefaultLiveWindowFlushPollInterval — both first-guess starting
+	// values, not validated against real data, same caveat as this
+	// build's other first-guess thresholds.
+	LiveWindowFlushAfter        time.Duration
+	LiveWindowFlushPollInterval time.Duration
 }
 
 // WithPipeline attaches write-pipeline dependencies to an already-
@@ -215,6 +258,8 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	a.audioFetcher = deps.AudioFetcher
 	a.transcriptionConfig = deps.TranscriptionConfig
 	a.honorCorrectionsOnImport = deps.HonorCorrectionsOnImport
+	a.liveWindowFlushAfter = deps.LiveWindowFlushAfter
+	a.liveWindowFlushPollInterval = deps.LiveWindowFlushPollInterval
 
 	a.selfExternalIDs = make(map[string]bool, len(deps.SelfExternalIDs))
 	for _, id := range deps.SelfExternalIDs {
