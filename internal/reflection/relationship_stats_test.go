@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
@@ -58,6 +59,27 @@ func futureTestNow(t *testing.T) time.Time {
 	t.Helper()
 	days := 400 + rand.Intn(100000)
 	return time.Now().Add(time.Duration(days) * 24 * time.Hour)
+}
+
+// cleanupFutureTestMessages registers a t.Cleanup that deletes every
+// message in conversationIDs once the test finishes — belt-and-braces
+// alongside futureTestNow's own random draw: confirmed necessary, not
+// just defensive, after this fix's own development left over a
+// thousand future-dated rows from earlier iterations of these same
+// tests, which then collided with later runs' own random draws (the
+// draw space is huge, but not infinite, and debris that never gets
+// cleaned up only grows across however many times this suite runs over
+// this database's lifetime). Deleting by conversation_id, not by a
+// timestamp range: safe even if a real future-dated fixture is ever
+// legitimately added elsewhere, since this only ever touches the exact
+// conversations this test itself created.
+func cleanupFutureTestMessages(t *testing.T, pool *pgxpool.Pool, conversationIDs ...uuid.UUID) {
+	t.Helper()
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DELETE FROM messages WHERE conversation_id = ANY($1)`, conversationIDs); err != nil {
+			t.Logf("cleanupFutureTestMessages: %v", err)
+		}
+	})
 }
 
 // --- Requirement 7: unit tests for each formula component in isolation ---
@@ -616,6 +638,7 @@ func TestRecomputeRelationshipStats_GroupChat(t *testing.T) {
 
 	now := futureTestNow(t)
 	groupConv := uuid.New()
+	cleanupFutureTestMessages(t, pool, groupConv)
 
 	// Alice's only message: 30 days ago, outside the 28-day window.
 	aliceMessageAt := now.Add(-30 * 24 * time.Hour)
@@ -701,10 +724,12 @@ func TestRecomputeRelationshipStats_MixedOneOnOneAndGroup(t *testing.T) {
 	eve := createTestEntity(t, ctx, entityStore, "Mixed Eve "+uuid.New().String())
 
 	now := futureTestNow(t)
+	dmConv := uuid.New()
+	groupConv := uuid.New()
+	cleanupFutureTestMessages(t, pool, dmConv, groupConv)
 
 	// David's 1:1 DM: 6 messages each direction (total 12), all within
 	// the window.
-	dmConv := uuid.New()
 	for i := 0; i < 6; i++ {
 		at := now.Add(-time.Duration(i+1) * time.Hour)
 		createTestMessage(t, ctx, msgStore, dmConv, david.ID, at)
@@ -713,7 +738,6 @@ func TestRecomputeRelationshipStats_MixedOneOnOneAndGroup(t *testing.T) {
 
 	// A group David and Eve are both in: David sends 8, Eve sends 4,
 	// Marco sends some too (never credited to either).
-	groupConv := uuid.New()
 	for i := 0; i < 8; i++ {
 		createTestMessage(t, ctx, msgStore, groupConv, david.ID, now.Add(-time.Duration(i+1)*time.Hour))
 	}
@@ -758,9 +782,11 @@ func TestRecomputeRelationshipStats_HighVolumeGroupNotMember(t *testing.T) {
 	henry := createTestEntity(t, ctx, entityStore, "HighVol Henry "+uuid.New().String())
 
 	now := futureTestNow(t)
+	frankConv := uuid.New()
+	busyGroupConv := uuid.New()
+	cleanupFutureTestMessages(t, pool, frankConv, busyGroupConv)
 
 	// Frank: an ordinary 1:1 DM, total window count 20.
-	frankConv := uuid.New()
 	for i := 0; i < 10; i++ {
 		at := now.Add(-time.Duration(i+1) * time.Hour)
 		createTestMessage(t, ctx, msgStore, frankConv, frank.ID, at)
@@ -769,7 +795,6 @@ func TestRecomputeRelationshipStats_HighVolumeGroupNotMember(t *testing.T) {
 
 	// A high-volume group Frank is NOT a member of at all: Grace and
 	// Henry, 100 messages each within the window.
-	busyGroupConv := uuid.New()
 	for i := 0; i < 100; i++ {
 		createTestMessage(t, ctx, msgStore, busyGroupConv, grace.ID, now.Add(-time.Duration(i+1)*time.Minute))
 		createTestMessage(t, ctx, msgStore, busyGroupConv, henry.ID, now.Add(-time.Duration(i+1)*time.Minute))
@@ -817,8 +842,10 @@ func TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow(t *testing
 	zoe := createTestEntity(t, ctx, entityStore, "AllTime Zoe "+uuid.New().String())
 
 	now := futureTestNow(t)
-
 	groupConv := uuid.New()
+	zoeConv := uuid.New()
+	cleanupFutureTestMessages(t, pool, groupConv, zoeConv)
+
 	// Bob's one message: 60 days ago, well outside the window — present
 	// only so this conversation has 2 distinct non-self senders all-time.
 	createTestMessage(t, ctx, msgStore, groupConv, bob.ID, now.Add(-60*24*time.Hour))
@@ -834,7 +861,6 @@ func TestRecomputeRelationshipStats_GroupClassifiedByAllTimeNotWindow(t *testing
 	}
 
 	// Zoe: an ordinary 1:1 DM, total window count 5.
-	zoeConv := uuid.New()
 	createTestMessage(t, ctx, msgStore, zoeConv, zoe.ID, now.Add(-30*time.Minute))
 	for i := 0; i < 4; i++ {
 		createTestMessage(t, ctx, msgStore, zoeConv, self.ID, now.Add(-time.Duration(i+1)*time.Minute))
