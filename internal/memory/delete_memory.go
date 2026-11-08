@@ -72,6 +72,12 @@ func IsTombstone(e Edge) bool {
 // oldEdgeID has already been superseded — deleting an already-superseded
 // (or already-deleted) edge is a caller bug, surfaced rather than
 // silently redirected, same reasoning as CorrectMemory's own doc comment.
+//
+// Returns ErrEdgeNotFound ONLY when oldEdgeID does not exist — same
+// exclusivity guarantee as CorrectMemory's own doc comment states (see
+// also lockEdgeForUpdate and ErrEdgeNotFound's own doc comments): any
+// other failure comes back as its own distinct error, never downgraded
+// into "no such edge."
 func (s *EdgeStore) SoftDelete(ctx context.Context, oldEdgeID uuid.UUID) (*Edge, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {

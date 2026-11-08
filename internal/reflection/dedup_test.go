@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -537,5 +538,63 @@ func TestMergeDuplicates_FailingClusterDoesNotUndoCommittedClusters(t *testing.T
 	}
 	if !reloadedB2.IsCorrection {
 		t.Error("expected edgeB2 to still be is_correction (set directly, never reverted)")
+	}
+}
+
+// TestMergeDuplicates_CancelledContextStopsThePassRatherThanSkipping
+// covers requirement 9 at the dedup pass's own level (one layer above
+// memory.TestMergeDuplicateEdges_CancelledContextIsNotMisclassifiedAsConflict,
+// which covers the same fix one level down): before the
+// lockEdgeForUpdate-error-classification fix, a cancelled/failed
+// database call during a merge could come back from
+// EdgeStore.MergeDuplicateEdges as memory.ErrMergeConflict — which
+// MergeDuplicates' own branch (errors.Is(mergeErr, memory.
+// ErrMergeConflict) -> log and continue, see its own doc comment)
+// treats as a completely benign "this cluster's data moved, skip it and
+// keep going" outcome. A real infrastructure failure must stop the
+// whole pass instead, loudly, not be absorbed as if nothing of note
+// happened.
+func TestMergeDuplicates_CancelledContextStopsThePassRatherThanSkipping(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := memory.NewEntityStore(pool)
+	edgeStore := memory.NewEdgeStore(pool)
+
+	base := time.Now().Add(-72 * time.Hour)
+	litFn := func(s string) *string { return &s }
+
+	subject := createTestEntity(t, ctx, entityStore, "Dedup Cancelled Context Pass Subject")
+	edge1 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base)
+	edge2 := createTestEdge(t, ctx, pool, edgeStore, &memory.Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: litFn("run a marathon"),
+		Confidence: 0.8, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
+		DecayRate: memory.DecayRateSlow, SourceMessageIDs: []uuid.UUID{uuid.New()},
+	}, base.Add(1*time.Hour))
+	candidates := []*memory.Edge{edge1, edge2}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mergedCount, err := MergeDuplicates(cancelledCtx, edgeStore, candidates, DefaultDedupConfig(), nil)
+	if err == nil {
+		t.Fatal("expected a cancelled context to stop the pass with an error, got nil")
+	}
+	if errors.Is(err, memory.ErrMergeConflict) {
+		t.Errorf("expected a cancelled context NOT to be absorbed as memory.ErrMergeConflict (a silent skip), got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled) to hold, got: %v", err)
+	}
+	if mergedCount != 0 {
+		t.Errorf("expected mergedCount 0 (nothing committed before the failure), got %d", mergedCount)
+	}
+
+	reloaded2 := reloadEdge(t, ctx, edgeStore, edge2.ID)
+	if reloaded2.SupersededBy != nil {
+		t.Errorf("expected the cluster untouched after a cancelled-context failure, got superseded_by=%v", reloaded2.SupersededBy)
 	}
 }

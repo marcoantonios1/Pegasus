@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 func seedOldEdge(t *testing.T, ctx context.Context, edgeStore *EdgeStore, subjectID uuid.UUID, literal string) *Edge {
@@ -302,6 +303,10 @@ func TestCorrectMemory_AlreadySupersededEdgeErrors(t *testing.T) {
 	}
 }
 
+// TestCorrectMemory_NonexistentOldEdgeErrors covers requirement 6: a
+// genuinely missing row (a random UUID, never written) must match BOTH
+// ErrEdgeNotFound and pgx.ErrNoRows via errors.Is — the exact guarantee
+// ErrEdgeNotFound's own doc comment makes, against a real database.
 func TestCorrectMemory_NonexistentOldEdgeErrors(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()
@@ -318,5 +323,8 @@ func TestCorrectMemory_NonexistentOldEdgeErrors(t *testing.T) {
 	})
 	if !errors.Is(err, ErrEdgeNotFound) {
 		t.Errorf("expected ErrEdgeNotFound, got %v", err)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("expected errors.Is(err, pgx.ErrNoRows) to also hold, got %v", err)
 	}
 }

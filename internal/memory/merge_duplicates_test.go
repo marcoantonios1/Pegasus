@@ -497,3 +497,65 @@ func TestMergeDuplicateEdges_MidMergeFailureRollsBack(t *testing.T) {
 		t.Errorf("expected the duplicate's superseded_by rolled back to nil, got %v", reloadedDup.SupersededBy)
 	}
 }
+
+// TestMergeDuplicateEdges_CancelledContextIsNotMisclassifiedAsConflict
+// covers requirement 9 at the lockEdgeForUpdate-error-classification
+// fix's own caller: before that fix, lockEdgeForUpdate wrapped EVERY
+// query failure as ErrEdgeNotFound, which this method's own check
+// (errors.Is(lockErr, ErrEdgeNotFound) -> return ErrMergeConflict, see
+// its own doc comment) would have silently turned a real infrastructure
+// failure — here, a cancelled ctx — into a benign "stale candidate, skip
+// it" outcome. reflection.MergeDuplicates (the dedup pass) treats
+// ErrMergeConflict as skippable but anything else as a hard stop, so
+// this one misclassification would have made a cancelled/failed dedup
+// pass look like it just found nothing to merge. Confirmed fixed: a
+// cancelled ctx against a REAL candidate pair (both rows genuinely
+// exist and would otherwise merge cleanly) must come back as its own
+// distinct error, never ErrMergeConflict.
+func TestMergeDuplicateEdges_CancelledContextIsNotMisclassifiedAsConflict(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	entityStore := NewEntityStore(pool)
+	edgeStore := NewEdgeStore(pool)
+
+	subject := createTestEntity(t, ctx, entityStore, "Dedup Cancelled Context Subject")
+
+	survivor := &Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: lit("run a marathon"),
+		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0, DecayRate: DecayRateSlow,
+	}
+	if err := edgeStore.Create(ctx, survivor); err != nil {
+		t.Fatalf("create survivor: %v", err)
+	}
+	duplicate := &Edge{
+		SubjectID: subject.ID, Predicate: "goal_is", ObjectLiteral: lit("run a marathon"),
+		Confidence: 0.8, Importance: 0.4, SourceType: "whatsapp_text", SourceWeight: 1.0, DecayRate: DecayRateSlow,
+	}
+	if err := edgeStore.Create(ctx, duplicate); err != nil {
+		t.Fatalf("create duplicate: %v", err)
+	}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := edgeStore.MergeDuplicateEdges(cancelledCtx, survivor.ID, []uuid.UUID{duplicate.ID})
+	if err == nil {
+		t.Fatal("expected an error for a cancelled context, got nil")
+	}
+	if errors.Is(err, ErrMergeConflict) {
+		t.Errorf("expected a cancelled context NOT to be misclassified as ErrMergeConflict, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled) to hold, got: %v", err)
+	}
+
+	// Neither row touched — the transaction never got far enough to
+	// write anything (or rolled back if it did).
+	reloadedDup, err := edgeStore.GetByID(ctx, duplicate.ID)
+	if err != nil {
+		t.Fatalf("GetByID(duplicate): %v", err)
+	}
+	if reloadedDup.SupersededBy != nil {
+		t.Errorf("expected the duplicate to remain unsuperseded after a cancelled-context failure, got %v", reloadedDup.SupersededBy)
+	}
+}
