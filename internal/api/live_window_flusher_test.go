@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +10,6 @@ import (
 
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
-	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
 // --- Live-window idle flush ---
@@ -597,7 +594,3 @@ func TestFlushIdleWindows_NeverCallsRecordActivity(t *testing.T) {
 		t.Errorf("expected FlushIdleWindows to never call RecordActivity, but count changed from %d to %d", callsBeforeFlush, recorder.calls)
 	}
 }
-
-var _ = fmt.Sprintf
-var _ = strings.Contains
-var _ = memory.SourceTypeWhatsAppText
