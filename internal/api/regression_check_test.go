@@ -28,38 +28,41 @@ func TestRegressionCheck_UpdateMemoryConcurrentWithReinforce(t *testing.T) {
 		t.Fatalf("create edge: %v", err)
 	}
 
-	const iterations = 200
+	const writers = 8
+	const perWriter = 25 // 200 total each side
 	base := time.Now()
+	maxTimestamp := base.Add(time.Duration(writers*perWriter-1) * time.Second)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(2 * writers)
 
-	importances := make([]float64, iterations)
-	for i := range importances {
-		importances[i] = float64(i%100) / 100.0
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				importance := float64((w*perWriter+i)%100) / 100.0
+				if _, err := a.UpdateMemory(ctx, edge.ID, UpdateMemoryFields{Importance: &importance}); err != nil {
+					t.Errorf("UpdateMemory: %v", err)
+					return
+				}
+			}
+		}()
 	}
-	maxTimestamp := base.Add(time.Duration(iterations-1) * time.Second)
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			if _, err := a.UpdateMemory(ctx, edge.ID, UpdateMemoryFields{Importance: &importances[i]}); err != nil {
-				t.Errorf("UpdateMemory iteration %d: %v", i, err)
-				return
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				seq := w*perWriter + i
+				at := base.Add(time.Duration(seq) * time.Second)
+				if err := ts.edges.Reinforce(ctx, edge.ID, at, at); err != nil {
+					t.Errorf("Reinforce: %v", err)
+					return
+				}
 			}
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			at := base.Add(time.Duration(i) * time.Second)
-			if err := ts.edges.Reinforce(ctx, edge.ID, at, at); err != nil {
-				t.Errorf("Reinforce iteration %d: %v", i, err)
-				return
-			}
-		}
-	}()
+		}()
+	}
 
 	wg.Wait()
 
