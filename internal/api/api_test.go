@@ -84,9 +84,22 @@ func newTestStores(t *testing.T) *testStores {
 	}
 }
 
+// createTestEntity always suffixes name with a fresh UUID before
+// creating it — the entity-resolution race fix (migration 000008) put a
+// case-insensitive UNIQUE index on canonical_name, so the many existing
+// callers of this helper that passed a fixed, human-readable literal
+// (e.g. "Why Test Marco") would otherwise collide: with each other
+// across the dozens of OTHER test functions using similarly-themed
+// fixed names, and with themselves across repeated runs against this
+// suite's shared, never-reset dev database — accumulating duplicate
+// rows was harmless before that unique index existed, but a flat-out
+// Create() failure (memory.ErrEntityExists) after it does. Suffixing
+// here, once, fixes every existing call site without needing to touch
+// each one individually; the human-readable prefix stays for
+// readability in failure output.
 func createTestEntity(t *testing.T, ctx context.Context, ts *testStores, entityType, name string) *memory.Entity {
 	t.Helper()
-	e := &memory.Entity{Type: entityType, CanonicalName: name}
+	e := &memory.Entity{Type: entityType, CanonicalName: name + " " + uuid.New().String()}
 	if err := ts.entities.Create(ctx, e); err != nil {
 		t.Fatalf("create test entity: %v", err)
 	}
