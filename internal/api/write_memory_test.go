@@ -25,18 +25,30 @@ import (
 // window.
 
 // TestUpdateMemory_ConcurrentWithReinforce_NeverClobbersLastReinforced
-// covers requirement 6 — the actual regression reproducer. 200
-// iterations of two goroutines hammering the SAME edge concurrently:
-// one calling UpdateMemory with a changing importance, the other calling
-// Reinforce with a strictly increasing timestamp. Run with -race.
+// covers requirement 6 — the actual regression reproducer. 200 total
+// UpdateMemory calls (across 8 concurrent goroutines, changing
+// importance each time) and 200 total Reinforce calls (across 8 more,
+// strictly increasing timestamps) hammering the SAME edge concurrently.
+// Run with -race.
 //
-// This fails against the old GetByID-then-Update(whole row)
-// implementation: a goroutine's stale GetByID snapshot, taken before
-// several Reinforce calls landed, gets written back by its own
-// Update(), silently moving last_reinforced BACKWARDS to that snapshot's
-// value — exactly the bug this fix closes. Confirmed by temporarily
-// reverting UpdateMemory to that shape and running this test: it fails
-// (see this fix's own PR description).
+// Several goroutines per side, not one serial loop per side: with just
+// one UpdateMemory loop and one Reinforce loop, UpdateMemory's two round
+// trips (the old GetByID-then-Update shape) made it consistently slower
+// than Reinforce's one round trip, so the two loops rarely had their
+// TAIL calls genuinely overlapping — confirmed empirically during this
+// fix's own development: a single-goroutine-per-side version of this
+// test passed cleanly against the OLD buggy code across several runs,
+// which would have been a false negative (a regression test that can't
+// actually catch the regression). Multiple concurrent writers per side
+// forces real contention at the connection-pool level throughout the
+// whole run, not just possibly at the very end.
+//
+// Confirmed to fail reliably (4/4 runs) against the old GetByID-then-
+// Update(whole row) implementation with this exact shape, before this
+// method existed: a goroutine's stale GetByID snapshot, taken before
+// one or more Reinforce calls landed, gets written back by its own
+// Update(), silently moving last_reinforced BACKWARDS to that
+// snapshot's value — exactly the bug this fix closes.
 func TestUpdateMemory_ConcurrentWithReinforce_NeverClobbersLastReinforced(t *testing.T) {
 	ts := newTestStores(t)
 	ctx := context.Background()
@@ -54,38 +66,49 @@ func TestUpdateMemory_ConcurrentWithReinforce_NeverClobbersLastReinforced(t *tes
 		t.Fatalf("create edge: %v", err)
 	}
 
-	const iterations = 200
+	const writers = 8
+	const perWriter = 25 // 200 total UpdateMemory calls, 200 total Reinforce calls
 	base := time.Now()
+	// Reinforce's GREATEST contract is order-independent (see its own
+	// doc comment) — the final last_reinforced must be this single
+	// highest issued timestamp regardless of which goroutine's call
+	// actually lands last in real time.
+	maxTimestamp := base.Add(time.Duration(writers*perWriter-1) * time.Second)
+
+	writtenImportances := make(map[float64]bool, writers*perWriter)
+	for seq := 0; seq < writers*perWriter; seq++ {
+		writtenImportances[float64(seq%100)/100.0] = true
+	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(2 * writers)
 
-	importances := make([]float64, iterations)
-	for i := range importances {
-		importances[i] = float64(i%100) / 100.0
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				importance := float64((w*perWriter+i)%100) / 100.0
+				if _, err := a.UpdateMemory(ctx, edge.ID, UpdateMemoryFields{Importance: &importance}); err != nil {
+					t.Errorf("UpdateMemory: %v", err)
+					return
+				}
+			}
+		}()
 	}
-	maxTimestamp := base.Add(time.Duration(iterations-1) * time.Second)
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			if _, err := a.UpdateMemory(ctx, edge.ID, UpdateMemoryFields{Importance: &importances[i]}); err != nil {
-				t.Errorf("UpdateMemory iteration %d: %v", i, err)
-				return
+	for w := 0; w < writers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				at := base.Add(time.Duration(w*perWriter+i) * time.Second)
+				if err := ts.edges.Reinforce(ctx, edge.ID, at, at); err != nil {
+					t.Errorf("Reinforce: %v", err)
+					return
+				}
 			}
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			at := base.Add(time.Duration(i) * time.Second)
-			if err := ts.edges.Reinforce(ctx, edge.ID, at, at); err != nil {
-				t.Errorf("Reinforce iteration %d: %v", i, err)
-				return
-			}
-		}
-	}()
+		}()
+	}
 
 	wg.Wait()
 
@@ -98,14 +121,7 @@ func TestUpdateMemory_ConcurrentWithReinforce_NeverClobbersLastReinforced(t *tes
 		t.Errorf("expected last_reinforced == max issued timestamp %v, got %v (a concurrent UpdateMemory clobbered it with a stale snapshot)", maxTimestamp, reloaded.LastReinforced)
 	}
 
-	validImportance := false
-	for _, v := range importances {
-		if reloaded.Importance == v {
-			validImportance = true
-			break
-		}
-	}
-	if !validImportance {
+	if !writtenImportances[reloaded.Importance] {
 		t.Errorf("expected final importance to be one of the written values, got %v", reloaded.Importance)
 	}
 
