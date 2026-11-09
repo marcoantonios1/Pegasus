@@ -111,6 +111,23 @@ func createTestEdge(t *testing.T, ctx context.Context, ts *testStores, e *memory
 	return e
 }
 
+// markTestEdgeSuperseded sets superseded_by directly via SQL — test-only
+// setup for "this edge is already superseded" scenarios, now that
+// EdgeStore.Update (a full-row write-back any test could previously
+// (ab)use for this) no longer exists (the full-row-Update-clobbers-
+// concurrent-changes fix: see edge_store.go's own write-contract
+// comment). Production code never needs this shape at all — a real
+// supersession always goes through supersedeEdge under a FOR UPDATE
+// lock (correct_memory.go), which only ever runs as part of
+// CorrectMemory/SoftDelete/MergeDuplicateEdges, never as a bare
+// "set this column" call a test could reuse directly.
+func markTestEdgeSuperseded(t *testing.T, ctx context.Context, ts *testStores, edgeID, supersededByID uuid.UUID) {
+	t.Helper()
+	if _, err := ts.pool.Exec(ctx, `UPDATE edges SET superseded_by = $1 WHERE id = $2`, supersededByID, edgeID); err != nil {
+		t.Fatalf("mark test edge superseded: %v", err)
+	}
+}
+
 func createTestMessage(t *testing.T, ctx context.Context, ts *testStores, conversationID, senderID uuid.UUID, mediaType string, sentAt time.Time) *memory.Message {
 	t.Helper()
 	m := &memory.Message{
