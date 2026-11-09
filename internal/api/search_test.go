@@ -148,3 +148,29 @@ func TestSearchSemantic_NoEmbedderReturnsError(t *testing.T) {
 		t.Error("expected an error when SearchSemantic is called with no embedder configured")
 	}
 }
+
+// TestSearchSemantic_UsesQueryModeNotDocument covers requirement 10's
+// SearchSemantic half of the nomic-embed-text task-prefix fix: the
+// search text must go through EmbedQuery, never EmbedDocument.
+func TestSearchSemantic_UsesQueryModeNotDocument(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	embedder := &fakeEmbedder{queryVector: basisVector(randomBasisIndex(), 1)}
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder)
+
+	queryText := "what does Marco like"
+	if _, err := a.SearchSemantic(ctx, queryText, 5); err != nil {
+		t.Fatalf("SearchSemantic: %v", err)
+	}
+
+	if embedder.queryCalls != 1 {
+		t.Errorf("expected exactly 1 EmbedQuery call, got %d", embedder.queryCalls)
+	}
+	if embedder.documentCalls != 0 {
+		t.Errorf("expected EmbedDocument never called by SearchSemantic, got %d calls", embedder.documentCalls)
+	}
+	if embedder.lastQueryInput != queryText {
+		t.Errorf("expected EmbedQuery called with the search text %q, got %q", queryText, embedder.lastQueryInput)
+	}
+}
