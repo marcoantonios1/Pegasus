@@ -84,12 +84,16 @@ func main() {
 
 func run() error {
 	fs := flag.NewFlagSet("backfill_embeddings", flag.ExitOnError)
-	pegasusDSN := fs.String("pegasus-db", envOr("PEGASUS_DATABASE_URL", "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"), "Pegasus Postgres DSN")
+	pegasusDSN := fs.String("pegasus-db", envOr("PEGASUS_DATABASE_URL", ""), "Pegasus Postgres DSN (required — no default)")
 	costguardURL := fs.String("costguard-url", envOr("COSTGUARD_URL", "http://localhost:8080"), "Costguard base URL")
 	agent := fs.String("agent", envOr("BACKFILL_AGENT", "pegasus"), "Costguard X-Costguard-Agent tag this run's embedding requests carry")
 	rebuild := fs.Bool("rebuild", false, "re-embed EVERY message with text (not just ones missing an embedding) via the corrected, task-prefixed EmbedDocument path — see this tool's own package doc comment for why this is REQUIRED once after the nomic-embed-text task-prefix fix, and safe to re-run")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
+	}
+
+	if *pegasusDSN == "" {
+		return fmt.Errorf("--pegasus-db (or PEGASUS_DATABASE_URL) is required — this tool no longer defaults to a database")
 	}
 
 	ctx := context.Background()
