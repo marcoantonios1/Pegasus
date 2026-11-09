@@ -185,20 +185,37 @@ const maxGetOrCreateRetries = 3
 // not part of this schema's identity — there is nothing to reconcile
 // when two callers' default-type guesses for the same name disagree.
 func (s *EntityStore) GetOrCreateByCanonicalName(ctx context.Context, name, entityType string) (*Entity, bool, error) {
-	// TEMPORARY: reverted to the OLD check-then-create shape to verify
-	// the regression test fails against it. DO NOT COMMIT.
-	existing, err := s.GetByCanonicalName(ctx, name)
-	if err != nil {
-		return nil, false, err
+	for attempt := 0; attempt < maxGetOrCreateRetries; attempt++ {
+		var e Entity
+		err := s.db.QueryRow(ctx, `
+			INSERT INTO entities (type, canonical_name, is_self, metadata)
+			VALUES ($1, $2, false, '{}'::jsonb)
+			ON CONFLICT (lower(canonical_name)) DO NOTHING
+			RETURNING id, type, canonical_name, is_self, metadata, created_at, updated_at
+		`, entityType, name).Scan(
+			&e.ID, &e.Type, &e.CanonicalName, &e.IsSelf, &e.Metadata, &e.CreatedAt, &e.UpdatedAt,
+		)
+		if err == nil {
+			return &e, true, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, fmt.Errorf("get or create entity %q: %w", name, err)
+		}
+
+		// ON CONFLICT DO NOTHING inserted nothing — someone else already
+		// holds (or just won) this name. Fetch it fresh.
+		existing, getErr := s.GetByCanonicalName(ctx, name)
+		if getErr != nil {
+			return nil, false, fmt.Errorf("get or create entity %q: load existing row: %w", name, getErr)
+		}
+		if existing != nil {
+			return existing, false, nil
+		}
+		// existing == nil: the conflicting row was deleted between our
+		// own INSERT and this SELECT — retry.
 	}
-	if existing != nil {
-		return existing, false, nil
-	}
-	e := &Entity{Type: entityType, CanonicalName: name}
-	if err := s.Create(ctx, e); err != nil {
-		return nil, false, err
-	}
-	return e, true, nil
+
+	return nil, false, fmt.Errorf("get or create entity %q: gave up after %d attempts, the conflicting row kept disappearing between insert and lookup", name, maxGetOrCreateRetries)
 }
 
 // GetOrCreateSelf atomically resolves THE is_self entity: if one already
