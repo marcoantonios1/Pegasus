@@ -174,7 +174,7 @@ func TestCompleteWithModel_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	}
 }
 
-// --- Response-content-leak fix: Embed (requirements 12, 13) ---
+// --- Response-content-leak fix: embed, via EmbedDocument (requirements 12, 13) ---
 
 func TestEmbedDocument_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +202,7 @@ func TestEmbedDocument_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	}
 }
 
-func TestEmbed_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
+func TestEmbedDocument_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
