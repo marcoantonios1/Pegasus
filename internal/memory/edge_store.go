@@ -2,8 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,22 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Write contract (the full-row-Update-clobbers-concurrent-changes fix):
-// Create is the ONLY method that writes a whole edge. Every mutation
-// after that is either column-scoped (Reinforce: last_reinforced/
-// first_seen only; UpdateImportance: importance only; supersedeEdge:
-// superseded_by only) or runs inside an explicit transaction that locks
-// the row first (lockEdgeForUpdate's FOR UPDATE, used by CorrectMemory,
-// SoftDelete, MergeDuplicateEdges). No method on this store takes an
-// *Edge snapshot and writes it back wholesale — that shape is exactly
-// what the fix this comment documents removed (the former Update(ctx,
-// *Edge) method): a caller reads a row, mutates one field in Go, then
-// writes every OTHER field back from that now-possibly-stale snapshot,
-// silently overwriting whatever a concurrent Reinforce/correction/
-// deletion/merge did to this row in between. If a future change needs
-// to touch a new field, add a new narrow method (or extend an existing
-// one's own explicit column list) — never widen this store with another
-// read-mutate-write-the-whole-thing method.
 type EdgeStore struct {
 	db *pgxpool.Pool
 }
@@ -140,47 +122,38 @@ func (s *EdgeStore) GetByID(ctx context.Context, id uuid.UUID) (*Edge, error) {
 	return &e, nil
 }
 
-// UpdateImportance is the ONLY way to change an edge's importance — a
-// single-statement, single-column UPDATE with no read-modify-write
-// window at all (the fix for the removed Update(ctx, *Edge) method: see
-// this file's own write-contract comment). Returns the row as it
-// actually stands AFTER this write, read back in the same RETURNING
-// clause rather than via a separate GetByID — so the returned Edge
-// reflects any OTHER field a concurrent Reinforce/CorrectMemory/
-// SoftDelete/MergeDuplicateEdges changed in between this call's
-// transaction and now, instead of a caller's possibly-stale earlier
-// snapshot with just importance patched onto it.
-//
-// pgx.ErrNoRows (no edge with this ID) is wrapped as ErrEdgeNotFound,
-// the same classification lockEdgeForUpdate uses and for the same
-// reason: a genuinely missing row is the ONLY thing this sentinel means
-// (see ErrEdgeNotFound's own doc comment) — any other failure (a
-// connection error, a cancelled/timed-out context) propagates as its
-// own distinct, unwrapped-into-a-sentinel error.
-func (s *EdgeStore) UpdateImportance(ctx context.Context, edgeID uuid.UUID, importance float64) (*Edge, error) {
-	var e Edge
-
-	err := s.db.QueryRow(ctx, `
-		UPDATE edges SET importance = $1 WHERE id = $2
-		RETURNING
-			id, subject_id, predicate, object_id, object_literal, confidence,
-			importance, source_type, source_weight, source_message_ids,
-			first_seen, last_reinforced, decay_rate, decay_locked,
-			superseded_by, is_correction
-	`, importance, edgeID).Scan(
-		&e.ID, &e.SubjectID, &e.Predicate, &e.ObjectID, &e.ObjectLiteral, &e.Confidence,
-		&e.Importance, &e.SourceType, &e.SourceWeight, &e.SourceMessageIDs,
-		&e.FirstSeen, &e.LastReinforced, &e.DecayRate, &e.DecayLocked,
-		&e.SupersededBy, &e.IsCorrection,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %w", ErrEdgeNotFound, err)
-		}
-		return nil, fmt.Errorf("update importance for edge %s: %w", edgeID, err)
+func (s *EdgeStore) Update(ctx context.Context, e *Edge) error {
+	if e.SourceMessageIDs == nil {
+		e.SourceMessageIDs = []uuid.UUID{}
 	}
 
-	return &e, nil
+	_, err := s.db.Exec(ctx, `
+		UPDATE edges
+		SET
+			subject_id = $1, predicate = $2, object_id = $3, object_literal = $4,
+			confidence = $5, importance = $6, source_type = $7, source_weight = $8,
+			source_message_ids = $9, last_reinforced = $10, decay_rate = $11,
+			decay_locked = $12, superseded_by = $13, is_correction = $14
+		WHERE id = $15
+	`,
+		e.SubjectID,
+		e.Predicate,
+		e.ObjectID,
+		e.ObjectLiteral,
+		e.Confidence,
+		e.Importance,
+		e.SourceType,
+		e.SourceWeight,
+		e.SourceMessageIDs,
+		e.LastReinforced,
+		e.DecayRate,
+		e.DecayLocked,
+		e.SupersededBy,
+		e.IsCorrection,
+		e.ID,
+	)
+
+	return err
 }
 
 // GetBySubjectAndPredicate uses the (subject_id, predicate) index from
@@ -462,5 +435,4 @@ func edgeObjectMatches(e *Edge, objectID *uuid.UUID, objectLiteral *string) bool
 
 // Delete is intentionally not implemented: edges are never hard-deleted per
 // the proposal's data model. Superseding an edge is done via SupersededBy,
-// set through supersedeEdge (correct_memory.go) under a FOR UPDATE lock —
-// never through a general-purpose Update.
+// set through Update.
