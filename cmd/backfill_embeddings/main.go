@@ -87,6 +87,7 @@ func run() error {
 	pegasusDSN := fs.String("pegasus-db", envOr("PEGASUS_DATABASE_URL", "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"), "Pegasus Postgres DSN")
 	costguardURL := fs.String("costguard-url", envOr("COSTGUARD_URL", "http://localhost:8080"), "Costguard base URL")
 	agent := fs.String("agent", envOr("BACKFILL_AGENT", "pegasus"), "Costguard X-Costguard-Agent tag this run's embedding requests carry")
+	rebuild := fs.Bool("rebuild", false, "re-embed EVERY message with text (not just ones missing an embedding) via the corrected, task-prefixed EmbedDocument path — see this tool's own package doc comment for why this is REQUIRED once after the nomic-embed-text task-prefix fix, and safe to re-run")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -135,6 +136,10 @@ func run() error {
 		Logger: log.Printf,
 	})
 
+	if *rebuild {
+		return runRebuild(ctx, messages, a)
+	}
+
 	unembedded, err := messages.ListWithoutEmbeddings(ctx)
 	if err != nil {
 		return fmt.Errorf("list messages without embeddings: %w", err)
@@ -175,6 +180,59 @@ func run() error {
 		total.Embedded, total.AlreadyEmbedded, total.SkippedNoText, total.Failed)
 	if total.Failed > 0 {
 		fmt.Println("see the log lines above for which message IDs failed and why — each is safely re-runnable (this tool is idempotent), so re-running after addressing the cause will pick up exactly the ones still missing an embedding, nothing more.")
+	}
+
+	return nil
+}
+
+// runRebuild implements --rebuild — see this package's own doc comment
+// for the full "why" and the required deploy order. Mirrors run()'s own
+// batching/progress-reporting shape exactly (ListWithText in place of
+// ListWithoutEmbeddings, api.API.RebuildEmbeddings in place of
+// BackfillEmbeddings, api.RebuildEmbeddingsResult's Replaced/
+// SkippedNoText/Failed in place of EmbedMessagesResult's own fields),
+// not a second, diverging implementation of the same progress-printing
+// logic.
+func runRebuild(ctx context.Context, messages *memory.MessageStore, a *api.API) error {
+	withText, err := messages.ListWithText(ctx)
+	if err != nil {
+		return fmt.Errorf("list messages with text: %w", err)
+	}
+
+	fmt.Printf("rebuild: found %d message(s) with embeddable text to re-embed\n", len(withText))
+	if len(withText) == 0 {
+		return nil
+	}
+
+	var total api.RebuildEmbeddingsResult
+	for start := 0; start < len(withText); start += backfillBatchSize {
+		end := start + backfillBatchSize
+		if end > len(withText) {
+			end = len(withText)
+		}
+
+		ids := make([]uuid.UUID, end-start)
+		for i, m := range withText[start:end] {
+			ids[i] = m.ID
+		}
+
+		result, err := a.RebuildEmbeddings(ctx, ids)
+		if err != nil {
+			return fmt.Errorf("rebuild embeddings: %w", err)
+		}
+
+		total.Replaced += result.Replaced
+		total.SkippedNoText += result.SkippedNoText
+		total.Failed += result.Failed
+
+		fmt.Printf("rebuild: processed %d/%d (replaced=%d skipped_no_text=%d failed=%d)\n",
+			end, len(withText), total.Replaced, total.SkippedNoText, total.Failed)
+	}
+
+	fmt.Printf("rebuild done — replaced=%d skipped_no_text=%d failed=%d\n",
+		total.Replaced, total.SkippedNoText, total.Failed)
+	if total.Failed > 0 {
+		fmt.Println("see the log lines above for which message IDs failed and why — each kept its OLD embedding row untouched and is safely re-runnable; re-running --rebuild will re-embed everything again, including ones that already succeeded (this mode has no skip-if-already-done check by design).")
 	}
 
 	return nil
