@@ -53,10 +53,12 @@ func TestApplyBatchDecay(t *testing.T) {
 		Confidence: 0.8, Importance: 0.4, SourceType: "whatsapp_text", SourceWeight: 1.0,
 		DecayRate: memory.DecayRateStable,
 	}, base)
+	markTestEdgeSuperseded(t, ctx, pool, superseded.ID, supersededBy.ID)
+	// ApplyBatchDecay below reads e.SupersededBy off the IN-MEMORY edges
+	// slice directly (it never re-queries) — keep this struct's own field
+	// in sync with the SQL write above, same as createTestEdge already
+	// does for FirstSeen/LastReinforced.
 	superseded.SupersededBy = &supersededBy.ID
-	if err := edgeStore.Update(ctx, superseded); err != nil {
-		t.Fatalf("mark edge superseded: %v", err)
-	}
 
 	edges := []*memory.Edge{normal, locked, superseded}
 

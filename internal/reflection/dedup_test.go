@@ -85,6 +85,18 @@ func reloadEdge(t *testing.T, ctx context.Context, store *memory.EdgeStore, id u
 	return e
 }
 
+// markTestEdgeSuperseded sets superseded_by directly via SQL — test-only
+// setup for "this edge is already superseded" scenarios, now that
+// EdgeStore.Update (a full-row write-back any test could previously
+// (ab)use for this) no longer exists — see internal/memory/edge_store.go's
+// own write-contract comment.
+func markTestEdgeSuperseded(t *testing.T, ctx context.Context, pool *pgxpool.Pool, edgeID, supersededByID uuid.UUID) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE edges SET superseded_by = $1 WHERE id = $2`, supersededByID, edgeID); err != nil {
+		t.Fatalf("mark test edge superseded: %v", err)
+	}
+}
+
 func TestMergeDuplicates(t *testing.T) {
 	pool := testDB(t)
 	ctx := context.Background()

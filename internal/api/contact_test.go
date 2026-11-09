@@ -131,10 +131,7 @@ func TestGetRelationshipHistory_IncludesSuperseded_ContrastsGetRelevantContext(t
 		Confidence: 0.9, Importance: 0.6, SourceType: "whatsapp_text", SourceWeight: 1.0,
 		DecayRate: memory.DecayRateSlow,
 	}, now.Add(-30*24*time.Hour))
-	superseded.SupersededBy = &survivor.ID
-	if err := ts.edges.Update(ctx, superseded); err != nil {
-		t.Fatalf("mark superseded: %v", err)
-	}
+	markTestEdgeSuperseded(t, ctx, ts, superseded.ID, survivor.ID)
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
 

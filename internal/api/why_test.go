@@ -129,10 +129,7 @@ func TestWhyDoWeBelieveThis_SupersededByResolvesToLabel(t *testing.T) {
 		Confidence: 0.9, Importance: 0.5, SourceType: "whatsapp_text", SourceWeight: 1.0,
 		DecayRate: memory.DecayRateSlow,
 	}, now)
-	oldEdge.SupersededBy = &newEdge.ID
-	if err := ts.edges.Update(ctx, oldEdge); err != nil {
-		t.Fatalf("mark superseded: %v", err)
-	}
+	markTestEdgeSuperseded(t, ctx, ts, oldEdge.ID, newEdge.ID)
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
 

@@ -62,17 +62,35 @@ type UpdateMemoryFields struct {
 // because those are what its supersession/decay-lock/audit-trail
 // machinery exists to handle correctly; letting UpdateMemory silently
 // change them would bypass all of that.
+//
+// Calls EdgeStore.UpdateImportance directly — no GetByID-then-mutate-
+// then-write-back. That read-modify-write shape is the bug this fix
+// closes (EdgeStore.Update's own removal): a GetByID snapshot taken
+// here, then written back in full moments later, could silently UNDO
+// whatever a concurrent Reinforce/CorrectMemory/SoftDelete/
+// MergeDuplicateEdges did to this same row in between — up to and
+// including resurrecting a corrected-away or deleted fact by writing
+// back a stale superseded_by = NULL. UpdateImportance's single-column
+// UPDATE has no such window: nothing else on this row can be clobbered,
+// because nothing else is ever read back out of Go and written back in.
+//
+// fields.Importance == nil (nothing to change) is a pure read, not a
+// write: GetByID, no UpdateImportance call at all — preserving the same
+// "returns the edge unchanged" behavior this method always had for a
+// no-op call, but without ever risking a write on this path (there is
+// nothing to safely write back a "no change" for, so this simply
+// doesn't try).
 func (a *API) UpdateMemory(ctx context.Context, edgeID uuid.UUID, fields UpdateMemoryFields) (*memory.Edge, error) {
-	edge, err := a.edges.GetByID(ctx, edgeID)
+	if fields.Importance == nil {
+		edge, err := a.edges.GetByID(ctx, edgeID)
+		if err != nil {
+			return nil, fmt.Errorf("UpdateMemory(%s): %w", edgeID, err)
+		}
+		return edge, nil
+	}
+
+	edge, err := a.edges.UpdateImportance(ctx, edgeID, *fields.Importance)
 	if err != nil {
-		return nil, fmt.Errorf("UpdateMemory(%s): %w", edgeID, err)
-	}
-
-	if fields.Importance != nil {
-		edge.Importance = *fields.Importance
-	}
-
-	if err := a.edges.Update(ctx, edge); err != nil {
 		return nil, fmt.Errorf("UpdateMemory(%s): %w", edgeID, err)
 	}
 
