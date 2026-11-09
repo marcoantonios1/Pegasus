@@ -18,9 +18,16 @@ import (
 // RawMessage.ExternalID, instead of silently creating a duplicate row
 // every time. These tests exercise it directly against real Postgres.
 
+// createTestMessageEntity always suffixes name with a fresh UUID — see
+// createTestEntity's own doc comment (edge_store_reinforce_test.go, same
+// package) for why: the entity-resolution race fix's new unique index on
+// canonical_name turns a fixed literal name into a Create() failure
+// (ErrEntityExists) the moment any other test (or an earlier run of
+// this one) already used it, not just a harmless duplicate row the way
+// it used to be.
 func createTestMessageEntity(t *testing.T, ctx context.Context, store *EntityStore, name string) *Entity {
 	t.Helper()
-	e := &Entity{Type: "person", CanonicalName: name}
+	e := &Entity{Type: "person", CanonicalName: name + " " + uuid.New().String()}
 	if err := store.Create(ctx, e); err != nil {
 		t.Fatalf("create test entity: %v", err)
 	}
