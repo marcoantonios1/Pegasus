@@ -448,6 +448,53 @@ func (s *MessageStore) ListWithoutEmbeddings(ctx context.Context) ([]*Message, e
 	return msgs, rows.Err()
 }
 
+// ListWithText returns every message with embeddable text (see
+// hasUsableTextWhere), regardless of processed or embedded state —
+// api.RebuildEmbeddings' own candidate set (the task-prefix fix's
+// re-embed-everything pass, cmd/backfill_embeddings' --rebuild mode):
+// unlike ListWithoutEmbeddings (which answers "no embeddings row yet")
+// or ListUnprocessedWithText (which answers "processed=false AND has
+// text"), a rebuild needs EVERY message that has ever been embeddable,
+// including ones already embedded (that's the whole point — their
+// existing vector was generated without nomic-embed-text's required
+// task prefix and needs replacing) and ones not yet processed by
+// extraction (their raw_text/transcript already exists regardless of
+// whether a window has closed over them yet).
+//
+// Checked for an existing equivalent first: neither of the two queries
+// above answers "has text," unconditionally, for every message — each
+// adds its own extra filter (no embedding row / unprocessed) this
+// caller explicitly does NOT want.
+func (s *MessageStore) ListWithText(ctx context.Context) ([]*Message, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			id, conversation_id, sender_id, media_type, raw_text, transcript,
+			transcript_confidence, media_ref, processed, timestamp, external_id
+		FROM messages
+		WHERE `+hasUsableTextWhere+`
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*Message
+	for rows.Next() {
+		var m Message
+
+		if err := rows.Scan(
+			&m.ID, &m.ConversationID, &m.SenderID, &m.MediaType, &m.RawText, &m.Transcript,
+			&m.TranscriptConfidence, &m.MediaRef, &m.Processed, &m.Timestamp, &m.ExternalID,
+		); err != nil {
+			return nil, err
+		}
+
+		msgs = append(msgs, &m)
+	}
+
+	return msgs, rows.Err()
+}
+
 // hasUsableTextWhere is the "has embeddable text" condition ALONE (no
 // processed check — callers AND it with their own) — the same rule
 // api.messageText applies when deciding what to embed (raw_text if
