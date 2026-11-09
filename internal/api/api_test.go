@@ -197,21 +197,58 @@ func createTestEmbedding(t *testing.T, ctx context.Context, ts *testStores, mess
 // input text — lets tests control exactly what "the embedded query"
 // looks like without a live Costguard call, same pattern as
 // bulkimport's WindowExtractor fake pattern for *extraction.Extractor.
+//
+// Returns vector for EITHER mode by default — every existing use
+// predates the EmbedDocument/EmbedQuery split and just wants "some
+// vector back, doesn't matter which path," which this preserves
+// unchanged. A test that specifically needs the two modes to disagree
+// (proving which one a caller actually used — the task-prefix fix's own
+// routing tests, and RebuildEmbeddings' requirement that it uses the
+// document path) sets documentVector/queryVector instead, which take
+// priority over vector when set.
 type fakeEmbedder struct {
-	vector []float32
-	err    error
+	vector         []float32
+	documentVector []float32 // overrides vector for EmbedDocument, if non-nil
+	queryVector    []float32 // overrides vector for EmbedQuery, if non-nil
+	err            error
+
 	// calls is additive — every existing fakeEmbedder use predates this
 	// field and doesn't read it (same pattern as fakeExtractor.calls) —
 	// added so the message-ingestion idempotency fix's tests can assert
 	// a resumed/duplicate import triggers ZERO new embedding calls for
-	// an already-processed message.
+	// an already-processed message. Counts BOTH modes combined; see
+	// documentCalls/queryCalls for mode-specific counts (the task-prefix
+	// fix's own addition).
 	calls int
+
+	documentCalls     int
+	queryCalls        int
+	lastDocumentInput string
+	lastQueryInput    string
 }
 
-func (f *fakeEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+func (f *fakeEmbedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	f.calls++
+	f.documentCalls++
+	f.lastDocumentInput = text
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.documentVector != nil {
+		return f.documentVector, nil
+	}
+	return f.vector, nil
+}
+
+func (f *fakeEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	f.calls++
+	f.queryCalls++
+	f.lastQueryInput = text
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.queryVector != nil {
+		return f.queryVector, nil
 	}
 	return f.vector, nil
 }

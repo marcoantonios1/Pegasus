@@ -176,7 +176,7 @@ func TestCompleteWithModel_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 
 // --- Response-content-leak fix: Embed (requirements 12, 13) ---
 
-func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
+func TestEmbedDocument_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -190,7 +190,7 @@ func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
-	_, err := client.Embed(context.Background(), "text to embed")
+	_, err := client.EmbedDocument(context.Background(), "text to embed")
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -211,7 +211,7 @@ func TestEmbed_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
-	_, err := client.Embed(context.Background(), "text to embed")
+	_, err := client.EmbedDocument(context.Background(), "text to embed")
 	if err == nil {
 		t.Fatal("expected a parse error, got nil")
 	}

@@ -1066,7 +1066,7 @@ func (a *API) embedMessages(ctx context.Context, messageIDs []uuid.UUID) EmbedMe
 			continue
 		}
 
-		vec, err := a.embedder.Embed(ctx, text)
+		vec, err := a.embedder.EmbedDocument(ctx, text)
 		if err != nil {
 			a.logf("embedMessages: embed message %s: %v", id, err)
 			result.Failed++

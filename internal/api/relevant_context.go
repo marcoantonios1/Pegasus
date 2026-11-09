@@ -135,7 +135,7 @@ func (a *API) GetRelevantContext(ctx context.Context, query string, filters Filt
 			return nil, fmt.Errorf("GetRelevantContext: query %q requires an embedder, but this API was constructed with none", query)
 		}
 		var err error
-		queryVector, err = a.embedder.Embed(ctx, query)
+		queryVector, err = a.embedder.EmbedQuery(ctx, query)
 		if err != nil {
 			return nil, fmt.Errorf("GetRelevantContext: embed query: %w", err)
 		}

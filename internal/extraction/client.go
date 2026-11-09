@@ -38,7 +38,7 @@ type CostguardClient struct {
 	TranscriptionRetryBackoff time.Duration
 
 	// MaxResponseBytes overrides the response-size limit CompleteWithModel
-	// and Embed enforce via readResponseBody (see DefaultMaxResponseBytes'
+	// and embed enforce via readResponseBody (see DefaultMaxResponseBytes'
 	// own doc comment for why 4 MiB). Zero uses the default — a field
 	// rather than a package const specifically so tests can inject a tiny
 	// limit instead of a real test needing to generate a multi-megabyte
@@ -83,6 +83,27 @@ type chatCompletionResponse struct {
 // against existing embeddings rows to mean anything.
 const EmbeddingModel = "nomic-embed-text"
 
+// EmbeddingDocumentPrefix and EmbeddingQueryPrefix are nomic-embed-text's
+// own required task instructions (its model card/usage docs): text being
+// INDEXED must be prefixed "search_document: ", text being used to
+// SEARCH for something must be prefixed "search_query: " — the model was
+// trained with these two different embedding spaces, asymmetric by
+// design (a query vector and the document vector it's meant to retrieve
+// are NOT expected to be identical or even close in the same space a
+// symmetric model would use), and skipping them measurably lowers
+// retrieval quality. The fix this fix closes: one prefix-less Embed()
+// used to serve both document and query text identically.
+//
+// Both constants, and the asymmetric-embedding behavior they encode, are
+// SPECIFIC TO nomic-embed-text. Changing EmbeddingModel to a different
+// embedding model means revisiting whether it even wants task prefixes
+// at all, and if so, what they should say — do not assume these two
+// exact strings carry over.
+const (
+	EmbeddingDocumentPrefix = "search_document: "
+	EmbeddingQueryPrefix    = "search_query: "
+)
+
 type embeddingRequest struct {
 	Model string `json:"model"`
 	Input string `json:"input"`
@@ -94,8 +115,40 @@ type embeddingResponse struct {
 	} `json:"data"`
 }
 
-// Embed calls Costguard's OpenAI-compatible embeddings endpoint
-// (/v1/embeddings) for EmbeddingModel and returns the resulting vector.
+// EmbedDocument embeds text for INDEXING — storing it so it can later be
+// found by a query (embedMessages, internal/api/pipeline.go). Applies
+// EmbeddingDocumentPrefix; see embed's own doc comment for the shared
+// HTTP mechanics and summarizeResponse/readResponseBody for the request/
+// response handling both this and EmbedQuery reuse unchanged.
+func (c *CostguardClient) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
+	return c.embed(ctx, EmbeddingDocumentPrefix+text)
+}
+
+// EmbedQuery embeds text being used to SEARCH for something
+// (SearchSemantic, GetRelevantContext — internal/api). Applies
+// EmbeddingQueryPrefix.
+func (c *CostguardClient) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return c.embed(ctx, EmbeddingQueryPrefix+text)
+}
+
+// embed calls Costguard's OpenAI-compatible embeddings endpoint
+// (/v1/embeddings) for EmbeddingModel with input exactly as given and
+// returns the resulting vector — the HTTP mechanics EmbedDocument and
+// EmbedQuery both share. input already carries whichever task prefix the
+// caller (EmbedDocument/EmbedQuery) applied; this method does not know
+// or care which one, and applies neither itself — see those two methods'
+// own doc comments for why the prefix belongs there, not here, and
+// EmbeddingDocumentPrefix/EmbeddingQueryPrefix for why either prefix
+// exists at all.
+//
+// Deliberately unexported and NOT a replacement a caller could still
+// reach un-prefixed: the previous version of this method (Embed, taking
+// raw text with no prefix at all) is gone entirely, not kept as a third,
+// lower-level option — every embedding call in this codebase must go
+// through EmbedDocument or EmbedQuery, so a future call site that
+// forgets to pick one is a compile error, not a silent retrieval-quality
+// regression the way an un-prefixed Embed sitting there unused (but
+// still callable) would invite.
 //
 // This method did not exist before internal/api's read methods (proposal
 // §11/§13) needed it. Despite that issue's expectation of an existing
@@ -118,8 +171,8 @@ type embeddingResponse struct {
 // SearchSemantic are built against the real schema and will work
 // correctly once that ingestion-side gap is closed; they can't produce
 // meaningful results before it is.
-func (c *CostguardClient) Embed(ctx context.Context, text string) ([]float32, error) {
-	reqBody := embeddingRequest{Model: EmbeddingModel, Input: text}
+func (c *CostguardClient) embed(ctx context.Context, input string) ([]float32, error) {
+	reqBody := embeddingRequest{Model: EmbeddingModel, Input: input}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal embedding request: %w", err)
@@ -185,16 +238,17 @@ func (c *CostguardClient) Complete(ctx context.Context, prompt string) (string, 
 // check so a gzip-compressed ERROR body (not just a 200) still produces
 // a readable summary rather than raw/compressed bytes feeding the error.
 //
-// Embed and Transcribe route through this same readResponseBody/
+// embed and Transcribe route through this same readResponseBody/
 // summarizeResponse infrastructure now too (the unbounded-reads and
-// response-content-leak fix) — Embed and Transcribe therefore also gain
+// response-content-leak fix) — embed and Transcribe therefore also gain
 // gzip handling as a small, deliberate side effect: the original gzip
 // fix had scoped them out as unverified (Embed's own quick check back
-// then was inconclusive — a connection failure unrelated to gzip, not a
-// confirmed clean non-gzip response), but the magic-byte sniff this
-// shares with CompleteWithModel can't misfire on their JSON responses
-// either, so there's no reason to keep them without it now that the
-// bounded-read path is shared code anyway.
+// then — before Embed itself split into EmbedDocument/EmbedQuery over
+// this same embed — was inconclusive: a connection failure unrelated to
+// gzip, not a confirmed clean non-gzip response), but the magic-byte
+// sniff this shares with CompleteWithModel can't misfire on their JSON
+// responses either, so there's no reason to keep them without it now
+// that the bounded-read path is shared code anyway.
 func (c *CostguardClient) CompleteWithModel(ctx context.Context, model, prompt string) (string, error) {
 	reqBody := chatCompletionRequest{
 		Model:       model,

@@ -66,7 +66,7 @@ func (a *API) SearchSemantic(ctx context.Context, queryText string, topN int) ([
 		return nil, fmt.Errorf("SearchSemantic: this API was constructed with no embedder")
 	}
 
-	vec, err := a.embedder.Embed(ctx, queryText)
+	vec, err := a.embedder.EmbedQuery(ctx, queryText)
 	if err != nil {
 		return nil, fmt.Errorf("SearchSemantic: embed query: %w", err)
 	}
