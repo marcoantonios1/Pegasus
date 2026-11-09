@@ -174,9 +174,9 @@ func TestCompleteWithModel_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	}
 }
 
-// --- Response-content-leak fix: Embed (requirements 12, 13) ---
+// --- Response-content-leak fix: embed, via EmbedDocument (requirements 12, 13) ---
 
-func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
+func TestEmbedDocument_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -190,7 +190,7 @@ func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
-	_, err := client.Embed(context.Background(), "text to embed")
+	_, err := client.EmbedDocument(context.Background(), "text to embed")
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -202,7 +202,7 @@ func TestEmbed_NonOKStatusDoesNotLeakBody(t *testing.T) {
 	}
 }
 
-func TestEmbed_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
+func TestEmbedDocument_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -211,13 +211,122 @@ func TestEmbed_InvalidJSONOn200DoesNotLeakBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewCostguardClient(server.URL)
-	_, err := client.Embed(context.Background(), "text to embed")
+	_, err := client.EmbedDocument(context.Background(), "text to embed")
 	if err == nil {
 		t.Fatal("expected a parse error, got nil")
 	}
 	if strings.Contains(err.Error(), leakSecret) {
 		t.Errorf("expected the unparseable 200 body never to appear in the error, got: %v", err)
 	}
+}
+
+// --- nomic-embed-text task prefixes (requirement 9) ---
+
+func embeddingRequestCapturingServer(t *testing.T, gotReq *embeddingRequest) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(embeddingResponse{Data: []struct {
+			Embedding []float32 `json:"embedding"`
+		}{{Embedding: []float32{0.1, 0.2, 0.3}}}})
+	}))
+}
+
+// TestEmbedDocument_AppliesDocumentPrefixAndModel covers requirement 9's
+// EmbedDocument half: input must be exactly EmbeddingDocumentPrefix+text
+// (applied once, nothing stripped), and model must be EmbeddingModel.
+func TestEmbedDocument_AppliesDocumentPrefixAndModel(t *testing.T) {
+	var gotReq embeddingRequest
+	server := embeddingRequestCapturingServer(t, &gotReq)
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	if _, err := client.EmbedDocument(context.Background(), "I love playing chess"); err != nil {
+		t.Fatalf("EmbedDocument: %v", err)
+	}
+
+	wantInput := EmbeddingDocumentPrefix + "I love playing chess"
+	if gotReq.Input != wantInput {
+		t.Errorf("expected input %q, got %q", wantInput, gotReq.Input)
+	}
+	if gotReq.Model != EmbeddingModel {
+		t.Errorf("expected model %q, got %q", EmbeddingModel, gotReq.Model)
+	}
+}
+
+// TestEmbedQuery_AppliesQueryPrefixAndModel is EmbedDocument's test
+// above, for the query side.
+func TestEmbedQuery_AppliesQueryPrefixAndModel(t *testing.T) {
+	var gotReq embeddingRequest
+	server := embeddingRequestCapturingServer(t, &gotReq)
+	defer server.Close()
+
+	client := NewCostguardClient(server.URL)
+	if _, err := client.EmbedQuery(context.Background(), "what does Marco like"); err != nil {
+		t.Fatalf("EmbedQuery: %v", err)
+	}
+
+	wantInput := EmbeddingQueryPrefix + "what does Marco like"
+	if gotReq.Input != wantInput {
+		t.Errorf("expected input %q, got %q", wantInput, gotReq.Input)
+	}
+	if gotReq.Model != EmbeddingModel {
+		t.Errorf("expected model %q, got %q", EmbeddingModel, gotReq.Model)
+	}
+}
+
+// TestEmbedDocumentAndQuery_GzipAndSizeLimitBehaviorUnchanged confirms
+// the task-prefix fix didn't disturb embed's shared mechanics (gzip
+// decoding, the response-size limit) for either EmbedDocument or
+// EmbedQuery — both route through the same private embed, so both must
+// still behave identically to CompleteWithModel's own equivalent,
+// already-tested behavior.
+func TestEmbedDocumentAndQuery_GzipAndSizeLimitBehaviorUnchanged(t *testing.T) {
+	plain, err := json.Marshal(embeddingResponse{Data: []struct {
+		Embedding []float32 `json:"embedding"`
+	}{{Embedding: []float32{0.4, 0.5, 0.6}}}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	t.Run("gzip Content-Encoding", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write(gzipCompress(t, plain))
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		client.HTTPClient = &http.Client{Transport: &http.Transport{DisableCompression: true}}
+
+		if _, err := client.EmbedDocument(context.Background(), "text"); err != nil {
+			t.Errorf("EmbedDocument with gzip response: %v", err)
+		}
+		if _, err := client.EmbedQuery(context.Background(), "text"); err != nil {
+			t.Errorf("EmbedQuery with gzip response: %v", err)
+		}
+	})
+
+	t.Run("oversize response rejected", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(bytes.Repeat([]byte("a"), 200))
+		}))
+		defer server.Close()
+
+		client := NewCostguardClient(server.URL)
+		client.MaxResponseBytes = 100
+
+		if _, err := client.EmbedDocument(context.Background(), "text"); !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("expected EmbedDocument to reject an oversize response, got: %v", err)
+		}
+		if _, err := client.EmbedQuery(context.Background(), "text"); !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("expected EmbedQuery to reject an oversize response, got: %v", err)
+		}
+	})
 }
 
 // --- Gzip response handling (fix-gzip-response-handling) ---

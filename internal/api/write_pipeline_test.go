@@ -530,6 +530,42 @@ func TestStoreExtractedTriples_WritesEmbeddingForSourceMessage(t *testing.T) {
 	}
 }
 
+// TestStoreExtractedTriples_EmbedsViaDocumentModeNotQuery covers
+// requirement 10's embedMessages/storeExtractedTriples half of the
+// nomic-embed-text task-prefix fix: a message being indexed must go
+// through EmbedDocument, never EmbedQuery — mixing the two up is exactly
+// the retrieval-quality regression this fix closes.
+func TestStoreExtractedTriples_EmbedsViaDocumentModeNotQuery(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	sender := createTestEntity(t, ctx, ts, "person", "Embed Mode Routing Sender "+uuid.New().String())
+	text := "I love playing chess"
+	msg := &memory.Message{
+		ConversationID: uuid.New(), SenderID: sender.ID, MediaType: "text", RawText: &text, Timestamp: time.Now(),
+	}
+	if err := ts.messages.Create(ctx, msg); err != nil {
+		t.Fatalf("create test message: %v", err)
+	}
+
+	embedder := &fakeEmbedder{documentVector: basisVector(randomBasisIndex(), 1)}
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder)
+
+	if _, err := a.storeExtractedTriples(ctx, nil, memory.SourceTypeWhatsAppText, []uuid.UUID{msg.ID}, time.Now()); err != nil {
+		t.Fatalf("storeExtractedTriples: %v", err)
+	}
+
+	if embedder.documentCalls != 1 {
+		t.Errorf("expected exactly 1 EmbedDocument call, got %d", embedder.documentCalls)
+	}
+	if embedder.queryCalls != 0 {
+		t.Errorf("expected EmbedQuery never called by the indexing path, got %d calls", embedder.queryCalls)
+	}
+	if embedder.lastDocumentInput != text {
+		t.Errorf("expected EmbedDocument called with the message's own text %q, got %q", text, embedder.lastDocumentInput)
+	}
+}
+
 // TestStoreExtractedTriples_EmbedsMessageEvenWithZeroTriples covers
 // requirement 1's own explicitly-named scenario: a message in a window
 // triage flagged as a candidate, but extraction produced nothing from —

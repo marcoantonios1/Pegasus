@@ -162,6 +162,34 @@ func TestGetRelevantContext_RankingReflectsWeightedFormula(t *testing.T) {
 	}
 }
 
+// TestGetRelevantContext_UsesQueryModeNotDocument covers requirement
+// 10's GetRelevantContext half of the nomic-embed-text task-prefix fix:
+// the query text must go through EmbedQuery, never EmbedDocument.
+func TestGetRelevantContext_UsesQueryModeNotDocument(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	subject := createTestEntity(t, ctx, ts, "person", "Embed Mode Routing Context Subject")
+
+	embedder := &fakeEmbedder{queryVector: basisVector(randomBasisIndex(), 1)}
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder)
+
+	queryText := "some query"
+	if _, err := a.GetRelevantContext(ctx, queryText, Filters{SubjectID: &subject.ID}, 10); err != nil {
+		t.Fatalf("GetRelevantContext: %v", err)
+	}
+
+	if embedder.queryCalls != 1 {
+		t.Errorf("expected exactly 1 EmbedQuery call, got %d", embedder.queryCalls)
+	}
+	if embedder.documentCalls != 0 {
+		t.Errorf("expected EmbedDocument never called by GetRelevantContext, got %d calls", embedder.documentCalls)
+	}
+	if embedder.lastQueryInput != queryText {
+		t.Errorf("expected EmbedQuery called with the query text %q, got %q", queryText, embedder.lastQueryInput)
+	}
+}
+
 func assertContainsEdge(t *testing.T, edges []*memory.Edge, id uuid.UUID, want bool) {
 	t.Helper()
 	got := false

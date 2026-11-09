@@ -38,9 +38,25 @@ import (
 // needs, narrowed to an interface so tests can inject a fake instead of
 // requiring a live Costguard/model call — same pattern as
 // internal/bulkimport.WindowExtractor narrowing *extraction.Extractor.
-// *extraction.CostguardClient satisfies this via its Embed method.
+// *extraction.CostguardClient satisfies this via its EmbedDocument/
+// EmbedQuery methods.
+//
+// Two methods, not one, because nomic-embed-text (extraction.
+// EmbeddingModel) requires a different task prefix depending on which
+// side of retrieval the text is on (extraction.EmbeddingDocumentPrefix/
+// EmbeddingQueryPrefix's own doc comment has the full reasoning) — text
+// being INDEXED (embedMessages, storing a message so it can later be
+// found) is a different embedding space from text being used to SEARCH
+// (SearchSemantic/GetRelevantContext's query). Mixing them up measurably
+// lowers retrieval quality, which is exactly what calling a single,
+// prefix-less Embed() for both used to do. Keeping this as two distinct
+// interface methods (rather than one Embed(ctx, text, mode) call) means
+// a caller that reaches for the wrong one is a compile error at the call
+// site reading "EmbedDocument" or "EmbedQuery", not a runtime mode flag
+// that's easy to pass backwards.
 type Embedder interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
+	EmbedDocument(ctx context.Context, text string) ([]float32, error)
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 }
 
 // Extractor is the subset of *extraction.Extractor the write pipeline
