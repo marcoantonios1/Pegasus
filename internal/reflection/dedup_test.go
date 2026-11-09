@@ -43,9 +43,18 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// createTestEntity always suffixes name with a fresh UUID — the
+// entity-resolution race fix (migration 000008) put a case-insensitive
+// UNIQUE index on canonical_name, so the many existing callers of this
+// helper that passed a fixed, human-readable literal would otherwise
+// collide with each other and with themselves across repeated runs
+// against this suite's shared, never-reset dev database (harmless
+// before that unique index existed, a flat-out Create() failure —
+// memory.ErrEntityExists — after it does). Suffixing here, once, fixes
+// every existing call site without touching each individually.
 func createTestEntity(t *testing.T, ctx context.Context, store *memory.EntityStore, name string) *memory.Entity {
 	t.Helper()
-	e := &memory.Entity{Type: "person", CanonicalName: name}
+	e := &memory.Entity{Type: "person", CanonicalName: name + " " + uuid.New().String()}
 	if err := store.Create(ctx, e); err != nil {
 		t.Fatalf("create test entity: %v", err)
 	}
