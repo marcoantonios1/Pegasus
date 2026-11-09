@@ -77,7 +77,7 @@ func main() {
 
 func run() error {
 	messagesPath := flag.String("messages", "", "path to the input JSON file (see example_messages.json)")
-	dsn := flag.String("db", "", "Postgres DSN (defaults to $PEGASUS_TEST_DATABASE_URL, then the standard local dev DSN)")
+	dsn := flag.String("db", "", "Postgres DSN (defaults to $PEGASUS_TEST_DATABASE_URL; required if that's unset)")
 	flag.Parse()
 
 	if *messagesPath == "" {
@@ -112,7 +112,7 @@ func run() error {
 		resolvedDSN = os.Getenv("PEGASUS_TEST_DATABASE_URL")
 	}
 	if resolvedDSN == "" {
-		resolvedDSN = "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"
+		return fmt.Errorf("no database URL: pass --db or set PEGASUS_TEST_DATABASE_URL")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
