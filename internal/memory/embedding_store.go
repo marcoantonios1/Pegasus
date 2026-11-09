@@ -132,5 +132,50 @@ func (s *EmbeddingStore) Delete(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+// ReplaceForMessage atomically replaces every existing embedding row for
+// messageID with a single new row holding vector — the delete-and-insert
+// cmd/backfill_embeddings' --rebuild mode needs (api.RebuildEmbeddings),
+// for re-embedding messages whose existing vector was generated without
+// nomic-embed-text's required task prefix (the task-prefix fix: see
+// extraction.EmbeddingDocumentPrefix's own doc comment).
+//
+// Both statements run in ONE transaction specifically so a message is
+// NEVER observed with zero embedding rows mid-run: vector must already
+// be the newly-computed one (the caller computes it BEFORE calling this
+// — see RebuildEmbeddings' own doc comment for why that order matters),
+// so the delete and insert here are purely the atomic swap, never the
+// place a failed embedding call could leave a message with no rows at
+// all. If either statement fails, the transaction rolls back and the
+// message's OLD row is exactly as it was before this call — ReplaceForMessage
+// never partially applies.
+//
+// Does not change EmbeddingStore's "embeddings are immutable, a changed
+// message gets a new row" rule in general (see Update's own doc comment,
+// still true for every other caller) — this is a narrow, deliberate
+// exception for the one-time rebuild this fix ships, not a general
+// in-place-update method; a normal re-embed (e.g. message content
+// somehow changing) still has no supported path here.
+func (s *EmbeddingStore) ReplaceForMessage(ctx context.Context, messageID uuid.UUID, vector []float32) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) // no-op once Commit succeeds
+
+	if _, err := tx.Exec(ctx, `DELETE FROM embeddings WHERE message_id = $1`, messageID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO embeddings (message_id, vector) VALUES ($1, $2)
+	`, messageID, pgvector.NewVector(vector)); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 // Update is intentionally not implemented: embeddings are immutable once
-// written. A changed message gets a new Embedding row, not an in-place update.
+// written. A changed message gets a new Embedding row, not an in-place
+// update. ReplaceForMessage, above, is a narrow, named exception for the
+// task-prefix fix's one-time rebuild — not a general-purpose reopening
+// of that rule.
