@@ -52,22 +52,25 @@ func resolveConversationID(platform, externalConversationID string) uuid.UUID {
 // producing duplicate entities without explanation.
 func (a *API) resolveSender(ctx context.Context, senderExternalID string) (*memory.Entity, error) {
 	if a.selfExternalIDs[senderExternalID] {
-		self, err := a.entities.GetSelf(ctx)
+		// GetOrCreateSelf, not GetSelf-then-Create: the entity-resolution
+		// race fix. The old shape — look up the self entity, create one
+		// if missing — had no uniqueness enforced between those two
+		// steps, so two concurrent live messages/imports both
+		// classified as self (plausible: a resumed import running
+		// alongside live ingestion, both seeing Marco's own sender ID
+		// for the first time) could both find no self entity yet and
+		// both try to create one. entities_single_self_idx (migration
+		// 000001) already rejects the second CREATE outright, so this
+		// wasn't silently producing two is_self rows — it was surfacing
+		// as a raw unique-violation error from whichever caller lost
+		// the race, with no recovery. GetOrCreateSelf resolves that race
+		// internally (see its own doc comment) and returns the same
+		// entity to both callers either way.
+		self, err := a.entities.GetOrCreateSelf(ctx, senderExternalID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve self entity: %w", err)
 		}
-		if self != nil {
-			return self, nil
-		}
-		// No is_self entity exists yet — create one, keyed by the raw
-		// external ID for now (a real deployment would presumably set
-		// Marco's own display name at setup time; that setup flow is out
-		// of scope here).
-		e := &memory.Entity{Type: "person", CanonicalName: senderExternalID, IsSelf: true}
-		if err := a.entities.Create(ctx, e); err != nil {
-			return nil, fmt.Errorf("create self entity: %w", err)
-		}
-		return e, nil
+		return self, nil
 	}
 
 	return a.resolveEntity(ctx, senderExternalID, "person")
@@ -96,18 +99,25 @@ func (a *API) messageExternalID(externalID string) *string {
 // nickname); see EntityStore.GetByCanonicalName's own doc comment for why
 // that's a deliberate, documented simplification rather than a silent
 // gap.
+//
+// Calls GetOrCreateByCanonicalName, not GetByCanonicalName-then-Create:
+// the entity-resolution race fix. The old two-step shape had no
+// uniqueness enforced between the lookup and the create, so two
+// concurrent callers resolving the SAME name (a WhatsApp import and an
+// Instagram import both mentioning "Sara" for the first time; live
+// ingestion and a historical import doing the same) could both miss the
+// lookup and both insert — two Entity rows for what should be one
+// person, with every edge/message that happened to resolve to the
+// "wrong" one of the two now silently split across them. See migration
+// 000008 and GetOrCreateByCanonicalName's own doc comments for the full
+// fix (the unique index this relies on, and exactly how the race is
+// resolved without a caller ever seeing an error from it) and for why
+// the type the LOSING caller asked for is simply not applied when two
+// concurrent resolves disagree about a brand-new name's type.
 func (a *API) resolveEntity(ctx context.Context, name, entityType string) (*memory.Entity, error) {
-	existing, err := a.entities.GetByCanonicalName(ctx, name)
+	e, _, err := a.entities.GetOrCreateByCanonicalName(ctx, name, entityType)
 	if err != nil {
-		return nil, fmt.Errorf("look up entity %q: %w", name, err)
-	}
-	if existing != nil {
-		return existing, nil
-	}
-
-	e := &memory.Entity{Type: entityType, CanonicalName: name}
-	if err := a.entities.Create(ctx, e); err != nil {
-		return nil, fmt.Errorf("create entity %q: %w", name, err)
+		return nil, fmt.Errorf("resolve entity %q: %w", name, err)
 	}
 	return e, nil
 }

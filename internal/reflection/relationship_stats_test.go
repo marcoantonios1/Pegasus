@@ -546,7 +546,12 @@ func TestRecomputeRelationshipStats_UpsertOverwritesNotAccumulates(t *testing.T)
 	msgStore := memory.NewMessageStore(pool)
 	statsStore := memory.NewRelationshipStatsStore(pool)
 
-	self := &memory.Entity{Type: "person", CanonicalName: "Marco Two", IsSelf: false} // not is_self, avoids the single-is_self unique index colliding across tests
+	// IsSelf: false (avoids entities_single_self_idx colliding across
+	// tests) and a uuid-suffixed name (avoids entities_canonical_name_lower_uidx
+	// colliding — the entity-resolution race fix, migration 000008 —
+	// since this bypasses the createTestEntity helper that otherwise
+	// handles that automatically).
+	self := &memory.Entity{Type: "person", CanonicalName: "Marco Two " + uuid.New().String(), IsSelf: false}
 	if err := entityStore.Create(ctx, self); err != nil {
 		t.Fatalf("create self entity: %v", err)
 	}

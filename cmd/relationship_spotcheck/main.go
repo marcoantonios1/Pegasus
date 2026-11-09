@@ -25,11 +25,20 @@
 // timestamp). Save your real one under data/ (already gitignored) rather
 // than inside cmd/ — don't commit real message timestamps.
 //
-// Each run creates fresh self/contact entities rather than trying to
-// reuse ones from a previous run — this is a scratch tool against a local
-// dev DB that already accumulates plenty of test-seeded rows; matching
-// entities up idempotently isn't worth the complexity for a one-off
-// check.
+// Self/contact entities are resolved by name (EntityStore.
+// GetOrCreateByCanonicalName), not created fresh every run: entities.
+// canonical_name has a case-insensitive UNIQUE index now (the entity-
+// resolution race fix, migration 000008), so a second run against the
+// same self_name/contact_name would otherwise hard-fail on that
+// constraint instead of silently creating a second row the way it used
+// to. A practical side effect worth knowing, not just a mechanical
+// fix: running this tool twice against the SAME contact_name now
+// resolves to the SAME entity and therefore the SAME relationship —
+// the second run's messages add to the first run's, rather than each
+// run scoring an isolated, single-use entity. For a one-off spot-check
+// of a contact you've never spot-checked before, this makes no
+// difference; for re-running after editing the input file, it means
+// the earlier messages are still there too.
 package main
 
 import (
@@ -124,13 +133,13 @@ func run() error {
 
 	runCtx := context.Background()
 
-	self := &memory.Entity{Type: "person", CanonicalName: in.SelfName}
-	if err := entityStore.Create(runCtx, self); err != nil {
-		return fmt.Errorf("create self entity: %w", err)
+	self, _, err := entityStore.GetOrCreateByCanonicalName(runCtx, in.SelfName, "person")
+	if err != nil {
+		return fmt.Errorf("resolve self entity: %w", err)
 	}
-	contact := &memory.Entity{Type: "person", CanonicalName: in.ContactName}
-	if err := entityStore.Create(runCtx, contact); err != nil {
-		return fmt.Errorf("create contact entity: %w", err)
+	contact, _, err := entityStore.GetOrCreateByCanonicalName(runCtx, in.ContactName, "person")
+	if err != nil {
+		return fmt.Errorf("resolve contact entity: %w", err)
 	}
 
 	conversationID := uuid.New()

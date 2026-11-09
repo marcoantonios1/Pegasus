@@ -176,8 +176,13 @@ func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testi
 		t.Fatalf("resolve self entity: %v", err)
 	}
 
-	subjectName := "Counter Test Subject " + uuid.New().String()
-	subject := createTestEntity(t, ctx, ts, "person", subjectName)
+	// subject.CanonicalName (not a separately-held literal): createTestEntity
+	// appends its own uuid suffix on top of whatever name is passed (the
+	// entity-resolution race fix's own doc comment on that helper), so the
+	// triple below must reference the entity's ACTUAL stored name to
+	// resolve back to this same entity — a separately-held "subjectName"
+	// variable would no longer match.
+	subject := createTestEntity(t, ctx, ts, "person", "Counter Test Subject")
 
 	existingLit := "April"
 	existingEdge := &memory.Edge{
@@ -194,7 +199,7 @@ func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testi
 	idx := 0
 	oldValue := "April"
 	triples := []extraction.ExtractedTriple{
-		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.95, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
+		{Subject: subject.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.95, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 	}
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil)
@@ -296,8 +301,10 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 	ts := newTestStores(t)
 	ctx := context.Background()
 
-	subjectName := "Honor True Subject " + uuid.New().String()
-	subject := createTestEntity(t, ctx, ts, "person", subjectName)
+	// subject.CanonicalName, not a separately-held literal — see the
+	// other correction-gate test's own comment on why (createTestEntity
+	// appends its own uuid suffix).
+	subject := createTestEntity(t, ctx, ts, "person", "Honor True Subject")
 	existingLit := "April"
 	existingEdge := &memory.Edge{
 		SubjectID: subject.ID, Predicate: "has_birthday", ObjectLiteral: &existingLit,
@@ -311,7 +318,7 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 	idx := 0
 	oldValue := "April"
 	extractor := &fakeExtractor{triples: []extraction.ExtractedTriple{
-		{Subject: subjectName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
+		{Subject: subject.CanonicalName, Predicate: "has_birthday", Object: "March", ObjectType: "literal", Confidence: 0.9, IsCorrection: true, CorrectionSourceIndex: &idx, ReplacesObject: &oldValue},
 	}}
 	triager := &fakeTriager{candidate: true}
 
