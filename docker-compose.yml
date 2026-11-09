@@ -9,9 +9,9 @@ services:
     environment:
       POSTGRES_DB: pegasus
       POSTGRES_USER: pegasus
-      POSTGRES_PASSWORD: pegasus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +31,7 @@ services:
     command:
       [
         "-path=/migrations",
-        "-database", "postgres://pegasus:pegasus@postgres:5432/pegasus?sslmode=disable",
+        "-database", "postgres://pegasus:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/pegasus?sslmode=disable",
         "up"
       ]
     restart: "no"
@@ -50,7 +50,7 @@ services:
     environment:
       PGHOST: postgres
       PGUSER: pegasus
-      PGPASSWORD: pegasus
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       PGDATABASE: pegasus
       BACKUP_RETENTION_DAYS: "14"
     volumes:
