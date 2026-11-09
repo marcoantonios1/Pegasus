@@ -3,12 +3,88 @@
 ## Local development
 
 ```
+cp .env.example .env
+```
+
+Set a real `POSTGRES_PASSWORD` in `.env` — generate one with:
+
+```
+openssl rand -hex 24
+```
+
+then lock the file down and start the stack:
+
+```
+chmod 600 .env
 docker compose up -d postgres migrate
 ```
 
 `postgres` runs `pgvector/pgvector:pg16` (Postgres 16 with the `vector`
 extension preinstalled — required by migrations 000004/000005). `migrate`
 applies everything in `db/migrations/` via `golang-migrate`.
+
+Postgres's host port is bound to `127.0.0.1:5432`, not all interfaces, so
+the database is only reachable from this machine — Go tools and tests
+connect to it via `localhost`, same as before.
+
+**Existing `postgres_data` volume? Read this before setting `POSTGRES_PASSWORD`.**
+`POSTGRES_PASSWORD` is only applied when Postgres first initializes its data
+directory. If `postgres_data` already exists from a previous run, changing
+`POSTGRES_PASSWORD` in `.env` does **not** change the running database's
+actual password — Postgres never re-reads it. Two ways to actually change it:
+
+- **Rotate in place, keeping data (recommended):**
+
+  ```
+  docker exec -it pegasus-postgres psql -U pegasus -d pegasus
+  ```
+
+  then at the `psql` prompt:
+
+  ```
+  \password pegasus
+  ```
+
+  It prompts twice and never puts the password in your shell history or
+  `psql`'s own history — this works regardless of what the old password
+  was, because the official image trusts local-socket connections. Then
+  pick up the new value from `.env`:
+
+  ```
+  docker compose up -d
+  ```
+
+  This only recreates the containers; the `postgres_data` volume and its
+  data are untouched. **Do this before relying on the `backup` service** —
+  until you do, the `backup` container's `PGPASSWORD` (sourced from the
+  same `.env`) won't match the database's actual (old) password and its
+  dumps will fail.
+
+- **Start fresh (destroys data):** take a backup first (see "Backups"
+  below), then:
+
+  ```
+  docker compose down -v
+  docker compose up -d
+  ```
+
+  `down -v` removes the `postgres_data` volume, so Postgres reinitializes
+  with whatever `POSTGRES_PASSWORD` is currently in `.env`.
+
+### Running the DB-backed tests
+
+The DB-backed tests (`internal/memory`, `internal/api`, `internal/reflection`)
+connect using `PEGASUS_TEST_DATABASE_URL` if set, else a DSN built from
+`POSTGRES_PASSWORD`. Export your `.env` into the shell first:
+
+```
+set -a; source .env; set +a
+go test ./...
+```
+
+If no database is configured, DB-backed tests skip. If one *is* configured
+but the password is wrong (e.g. it was rotated and this shell's env is
+stale), they fail loudly instead of silently skipping.
 
 ## Git hooks
 
@@ -61,11 +137,13 @@ docker exec pegasus-postgres pg_dump -U pegasus pegasus | gzip > backups/pegasus
 ### Restoring a backup
 
 Restore into a throwaway container first to verify the dump before trusting
-it against real data:
+it against real data. `${POSTGRES_PASSWORD}` below just needs to be set to
+*some* value for this disposable container — export it from `.env`
+(`set -a; source .env; set +a`) or use a freshly generated throwaway one:
 
 ```
 docker run -d --name pegasus-restore-test \
-  -e POSTGRES_DB=pegasus -e POSTGRES_USER=pegasus -e POSTGRES_PASSWORD=pegasus \
+  -e POSTGRES_DB=pegasus -e POSTGRES_USER=pegasus -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
   pgvector/pgvector:pg16
 
 gunzip -c backups/pegasus_2026-07-17.sql.gz | docker exec -i pegasus-restore-test \

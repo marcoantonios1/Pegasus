@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/marcoantonios1/Pegasus/internal/memory"
@@ -18,29 +20,56 @@ import (
 // helper is unexported in a different package, so this is a deliberate,
 // small duplication rather than a new shared abstraction, matching this
 // repo's existing convention of each package owning its own DB-test
-// bootstrap. Skips (does not fail) the test if no database is reachable.
+// bootstrap. The DSN comes from PEGASUS_TEST_DATABASE_URL if set, else is
+// built from POSTGRES_PASSWORD (export it with `set -a; source .env; set
+// +a` before `go test`). Skips (does not fail) the test if no database is
+// configured or reachable, but FAILS it on an authentication failure
+// (SQLSTATE 28P01) — see isAuthFailure's doc comment for why that one case
+// must not be a skip.
 func testDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	dsn := os.Getenv("PEGASUS_TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"
+		if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
+			dsn = "postgres://pegasus:" + pw + "@localhost:5432/pegasus?sslmode=disable"
+		}
+	}
+	if dsn == "" {
+		t.Skip("no test database configured — set PEGASUS_TEST_DATABASE_URL, or POSTGRES_PASSWORD (`set -a; source .env; set +a`), to enable this test")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
+	if err == nil {
+		err = pool.Ping(ctx)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("no test database available (ping failed: %v) — run `docker compose up -d postgres migrate` to enable this test", err)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		if isAuthFailure(err) {
+			t.Fatalf("authentication failed connecting to the test database (%v) — the Postgres password was likely rotated; set PEGASUS_TEST_DATABASE_URL to the current DSN, or re-export POSTGRES_PASSWORD (`set -a; source .env; set +a`) before running go test", err)
+		}
+		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
 	}
 
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// isAuthFailure reports whether err is Postgres's "password
+// authentication failed" error (SQLSTATE 28P01) — the one failure mode
+// testDB must not silently skip on, since skipping on it would make a
+// password rotation invisible to the whole DB-backed test suite.
+func isAuthFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "28P01" {
+		return true
+	}
+	return strings.Contains(err.Error(), "password authentication failed")
 }
 
 // createTestEntity always suffixes name with a fresh UUID — the

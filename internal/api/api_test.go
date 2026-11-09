@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
 
@@ -33,7 +36,12 @@ func testDB(t *testing.T) *pgxpool.Pool {
 
 	dsn := os.Getenv("PEGASUS_TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://pegasus:pegasus@localhost:5432/pegasus?sslmode=disable"
+		if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
+			dsn = "postgres://pegasus:" + pw + "@localhost:5432/pegasus?sslmode=disable"
+		}
+	}
+	if dsn == "" {
+		t.Skip("no test database configured — set PEGASUS_TEST_DATABASE_URL, or POSTGRES_PASSWORD (`set -a; source .env; set +a`), to enable this test")
 	}
 
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -48,16 +56,33 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	defer cancel()
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
+	if err == nil {
+		err = pool.Ping(ctx)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("no test database available (ping failed: %v) — run `docker compose up -d postgres migrate` to enable this test", err)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		if isAuthFailure(err) {
+			t.Fatalf("authentication failed connecting to the test database (%v) — the Postgres password was likely rotated; set PEGASUS_TEST_DATABASE_URL to the current DSN, or re-export POSTGRES_PASSWORD (`set -a; source .env; set +a`) before running go test", err)
+		}
+		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
 	}
 
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// isAuthFailure reports whether err is Postgres's "password
+// authentication failed" error (SQLSTATE 28P01) — the one failure mode
+// testDB must not silently skip on, since skipping on it would make a
+// password rotation invisible to the whole DB-backed test suite.
+func isAuthFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "28P01" {
+		return true
+	}
+	return strings.Contains(err.Error(), "password authentication failed")
 }
 
 // testStores bundles every store this package's tests construct

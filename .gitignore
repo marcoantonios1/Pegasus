@@ -1,6 +1,7 @@
 # Secrets and local config
 .env
-.env.*.local
+.env.*
+!.env.example
 config.json
 config.local.yaml
 *.pem
