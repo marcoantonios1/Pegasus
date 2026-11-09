@@ -91,11 +91,15 @@ func TestWhyDoWeBelieveThis_BreakdownMatchesExactly(t *testing.T) {
 	for _, s := range belief.MentionedBy {
 		mentionedByCount[s.CanonicalName] = s.Count
 	}
-	if mentionedByCount["Why Test Marco"] != 4 {
-		t.Errorf("expected marco mentioned 4 times, got %d", mentionedByCount["Why Test Marco"])
+	// marco.CanonicalName/friend.CanonicalName, not the literals passed to
+	// createTestEntity — that helper appends its own uuid suffix (the
+	// entity-resolution race fix's own doc comment on it), so the
+	// ACTUAL stored name differs from the literal.
+	if mentionedByCount[marco.CanonicalName] != 4 {
+		t.Errorf("expected marco mentioned 4 times, got %d", mentionedByCount[marco.CanonicalName])
 	}
-	if mentionedByCount["Why Test Friend"] != 1 {
-		t.Errorf("expected friend mentioned 1 time, got %d", mentionedByCount["Why Test Friend"])
+	if mentionedByCount[friend.CanonicalName] != 1 {
+		t.Errorf("expected friend mentioned 1 time, got %d", mentionedByCount[friend.CanonicalName])
 	}
 
 	// Source types (media_type breakdown): text x4, voice x1.
