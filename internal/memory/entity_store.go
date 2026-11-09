@@ -3,11 +3,29 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrEntityExists is returned by Create when canonical_name already
+// exists, case-insensitively (a *pgconn.PgError unique violation,
+// SQLSTATE 23505, on entities_canonical_name_lower_uidx — migration
+// 000008) — translated into a typed sentinel so a direct caller can
+// handle "this name is taken" without matching on a raw driver error.
+// Wraps the original *pgconn.PgError via %w, so errors.As still reaches
+// it (e.g. to inspect ConstraintName) if a caller needs more than this
+// sentinel alone.
+//
+// Most callers should reach for GetOrCreateByCanonicalName instead,
+// which never raises this at all (it resolves the conflict internally
+// rather than surfacing it) — Create stays a plain, unconditional INSERT
+// for a caller that already knows the name is new, or that wants to
+// detect a collision explicitly rather than silently resolve it.
+var ErrEntityExists = errors.New("memory: entity with this canonical_name already exists")
 
 type EntityStore struct {
 	db *pgxpool.Pool
@@ -24,7 +42,7 @@ func (s *EntityStore) Create(ctx context.Context, e *Entity) error {
 		e.Metadata = map[string]any{}
 	}
 
-	return s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		INSERT INTO entities (type, canonical_name, is_self, metadata)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at, updated_at
@@ -34,6 +52,15 @@ func (s *EntityStore) Create(ctx context.Context, e *Entity) error {
 		e.IsSelf,
 		e.Metadata,
 	).Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("%w: %w", ErrEntityExists, err)
+		}
+		return err
+	}
+
+	return nil
 }
 
 func (s *EntityStore) GetByID(ctx context.Context, id uuid.UUID) (*Entity, error) {
