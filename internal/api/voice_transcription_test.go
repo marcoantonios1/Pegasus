@@ -26,7 +26,7 @@ func TestTranscribeVoiceMessage_ContextCancellationDoesNotEscalate(t *testing.T)
 	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
 		{err: fmt.Errorf("transcribe (waiting to retry after 502): %w", context.Canceled)},
 	}}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -48,7 +48,7 @@ func TestTranscribeVoiceMessage_DeadlineExceededDoesNotEscalate(t *testing.T) {
 	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
 		{err: fmt.Errorf("transcribe (waiting to retry after 502): %w", context.DeadlineExceeded)},
 	}}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	_, _, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.ogg")
 	if ok {
@@ -144,7 +144,7 @@ func TestTranscribeVoiceMessage_ArabicEscalationPassesLanguageOverride(t *testin
 	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{
 		Transcriber:         transcriber,
 		TranscriptionConfig: TranscriptionConfig{OpenAIProviderHint: "openai_primary"},
-	}).withTestSelf(t)
+	})
 
 	_, _, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.opus")
 	if !ok {
@@ -168,7 +168,7 @@ func TestTranscribeVoiceMessage_HighConfidenceNonArabicDoesNotEscalate(t *testin
 	transcriber := &fakeTranscriber{responses: []fakeTranscribeResult{
 		{resp: segResp("en", -0.1)},
 	}}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	text, confidence, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.ogg")
 	if !ok {
@@ -194,7 +194,7 @@ func TestTranscribeVoiceMessage_EscalationFailureFallsBackToLocal(t *testing.T) 
 		{resp: segResp("en", -0.9)}, // low confidence, triggers escalation
 		{err: fmt.Errorf("openai unreachable")},
 	}}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	text, confidence, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.ogg")
 	if !ok {
@@ -214,7 +214,7 @@ func TestTranscribeVoiceMessage_BothLegsFail(t *testing.T) {
 		{err: fmt.Errorf("local speaches unreachable")},
 		{err: fmt.Errorf("openai unreachable")},
 	}}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	text, confidence, ok := a.transcribeVoiceMessage(context.Background(), uuid.New(), []byte("audio"), "note.ogg")
 	if ok {
@@ -250,7 +250,7 @@ func TestTranscribeAndStore_NoFetcherConfigured(t *testing.T) {
 // since reuse short-circuits before either is touched.
 func TestTranscribeAndStore_ExistingTranscriptIsReused(t *testing.T) {
 	transcriber := &fakeTranscriber{}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 
 	existing := "already transcribed in a prior run"
 	msg := &memory.Message{ID: uuid.New(), Transcript: &existing}
@@ -269,7 +269,7 @@ func TestTranscribeAndStore_ExistingTranscriptIsReused(t *testing.T) {
 
 func TestTranscribeAndStore_NilMediaRef(t *testing.T) {
 	transcriber := &fakeTranscriber{}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 	msg := &memory.Message{ID: uuid.New()}
 
 	_, ok := a.transcribeAndStore(context.Background(), msg, nil, fixedAudioFetcher([]byte("audio")))
@@ -283,7 +283,7 @@ func TestTranscribeAndStore_NilMediaRef(t *testing.T) {
 
 func TestTranscribeAndStore_FetchFailure(t *testing.T) {
 	transcriber := &fakeTranscriber{}
-	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber}).withTestSelf(t)
+	a := New(nil, nil, nil, nil, nil, nil).WithPipeline(PipelineDeps{Transcriber: transcriber})
 	msg := &memory.Message{ID: uuid.New()}
 	mediaRef := "missing.ogg"
 

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"github.com/marcoantonios1/Pegasus/internal/testdb"
 	"testing"
 	"time"
 
@@ -419,7 +420,11 @@ func TestMergeDuplicateEdges_StaleSnapshotDoesNotClobberFreshChanges(t *testing.
 // runs after the survivor UPDATE in MergeDuplicateEdges' own write
 // order.
 func TestMergeDuplicateEdges_MidMergeFailureRollsBack(t *testing.T) {
-	pool := testDB(t)
+	// A database of its own: the trigger below fires on EVERY superseding
+	// UPDATE on edges, so on the shared dev database it broke whichever
+	// other package's tests superseded an edge while it existed (go test
+	// runs packages in parallel).
+	pool, _ := testdb.FreshPool(t)
 	ctx := context.Background()
 	entityStore := NewEntityStore(pool)
 	edgeStore := NewEdgeStore(pool)

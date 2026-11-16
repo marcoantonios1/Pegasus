@@ -104,6 +104,12 @@ func run() error {
 	// EmbeddingStore's vector column to round-trip without manual
 	// casting — a hard requirement for this tool specifically, since
 	// embedding storage is its entire job.
+	// Same self identity as the service (PEGASUS_SELF_*), checked
+	// before connecting (fail fast), then bound to the self entity below.
+	selfReg, err := service.LoadSelfIdentity(os.LookupEnv, "")
+	if err != nil {
+		return fmt.Errorf("self identity: %w", err)
+	}
 	pegasusCfg, err := pgxpool.ParseConfig(*pegasusDSN)
 	if err != nil {
 		return fmt.Errorf("parse pegasus DSN: %w", err)
@@ -141,13 +147,7 @@ func run() error {
 		Logger: log.Printf,
 	})
 
-	// Same self identity as the service (PEGASUS_SELF_*), bootstrapped
-	// before anything else: fail fast rather than run against a database
-	// whose self entity doesn't match the configuration.
-	selfReg, err := service.LoadSelfIdentity(os.LookupEnv, "")
-	if err != nil {
-		return fmt.Errorf("self identity: %w", err)
-	}
+	// Bound to the self entity before anything else touches the data.
 	if _, err := a.BootstrapSelf(ctx, selfReg); err != nil {
 		return fmt.Errorf("bootstrap self identity: %w", err)
 	}

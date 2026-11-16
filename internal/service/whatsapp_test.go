@@ -245,6 +245,7 @@ func TestWhatsApp_MessagesInEdgesOut_Ordering(t *testing.T) {
 			t.Errorf("want %s before %s: %v", a, b, ev)
 		}
 	}
+	order(EventSelfBootstrapped, EventSnapshotTaken)
 	order(EventSnapshotTaken, EventFlusherStarted)
 	order(EventFlusherStarted, EventRecoveryStarted)
 	order(EventRecoveryStarted, "client_add_handler")
@@ -477,5 +478,39 @@ func TestWhatsApp_RedeliveryCountedAsDuplicate(t *testing.T) {
 	var n int
 	if err := dbConn(t, cfg).QueryRow(context.Background(), `SELECT count(*) FROM messages WHERE external_id = $1`, string(e.Info.ID)).Scan(&n); err != nil || n != 1 {
 		t.Errorf("rows = %d (%v), want 1", n, err)
+	}
+}
+
+// TestRun_SelfBootstrapConflictExits2: an existing self entity under
+// another name (from earlier lazy creation) stops startup with a
+// ConfigError naming it; nothing is repaired.
+func TestRun_SelfBootstrapConflictExits2(t *testing.T) {
+	cfg := testConfig(t)
+	pool := testPool(t, cfg)
+	old, err := memory.NewEntityStore(pool).GetOrCreateSelf(context.Background(), "96170000001@s.whatsapp.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Run(context.Background(), cfg, Options{Logf: t.Logf})
+	if !IsConfigError(err) || !strings.Contains(err.Error(), old.ID.String()) {
+		t.Fatalf("Run = %v, want a ConfigError naming %s", err, old.ID)
+	}
+}
+
+// TestRun_PairedAccountMustBeConfigured: the live source's account is
+// verified, never added implicitly.
+func TestRun_PairedAccountMustBeConfigured(t *testing.T) {
+	cfg := testConfig(t) // identity: testSelfWhatsApp only
+	fx := newWAFixture()
+	src := wasource.NewWithClient(wasourcetest.New(fx.own), testWAConfig(t))
+	err := Run(context.Background(), cfg, Options{Sources: []LiveSource{src}, Logf: t.Logf})
+	if !IsConfigError(err) {
+		t.Fatalf("Run = %v, want a ConfigError", err)
+	}
+	if strings.Contains(err.Error(), fx.ownPN.User) {
+		t.Errorf("error leaks the full number: %v", err)
+	}
+	if !strings.Contains(err.Error(), "…"+fx.ownPN.User[len(fx.ownPN.User)-4:]) || !strings.Contains(err.Error(), "PEGASUS_SELF_WHATSAPP_IDS") {
+		t.Errorf("error should name the redacted account and the setting: %v", err)
 	}
 }
