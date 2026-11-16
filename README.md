@@ -251,9 +251,10 @@ account. So:
 - It uses the pure-Go SQLite driver (`modernc.org/sqlite`), so the image is
   still built with `CGO_ENABLED=0`.
 
-**Re-pairing after a logout** (`logged_out`): whatsmeow has already removed
-the dead device from the session store, so just stop the service and run the
-pair command again.
+**Re-pairing after a logout** (`logged_out`): the service removes the dead
+device from the session store itself, so just stop the service and run the
+pair command again. (If that removal fails, it logs so; then delete the
+session as below.)
 
 **Re-pairing voluntarily** (the device is still linked): unlink it on the
 phone (Settings → Linked devices), stop the service, delete the session
@@ -300,11 +301,14 @@ kept and counted as `lid_unmapped`.
 
 Delivery: each message goes to `ProcessLiveMessage` synchronously, bounded by
 `PEGASUS_LIVE_SINK_TIMEOUT`, with up to 3 attempts. That is safe because
-ingestion is idempotent on the WhatsApp message ID. There is no in-process
-queue, because WhatsApp has already acknowledged the message: it is durable
+ingestion is idempotent on the WhatsApp message ID. A redelivery of an
+already-stored message is counted as `duplicates`, not `forwarded`; this is
+normal shortly after linking, when whatsmeow re-requests messages it could
+not decrypt yet. There is no in-process queue, because WhatsApp has already acknowledged the message: it is durable
 once stored. A message that still fails is counted as `sink_failed` and
 logged by message ID only. Logs never contain message text, and JIDs are
-redacted to their last 4 digits.
+redacted to their last 4 digits. That includes whatsmeow's own log lines:
+any run of 8 or more digits (phone numbers, LIDs) is cut to its last 4.
 
 ### Connection health
 

@@ -441,3 +441,29 @@ func TestWhatsApp_SinkRetryIdempotent(t *testing.T) {
 	}
 	_ = src.Stop(ctx)
 }
+
+// TestWhatsApp_RedeliveryCountedAsDuplicate: WhatsApp redelivering the same
+// message ID (seen in production after an undecryptable first attempt)
+// stores one row and counts the second delivery as a duplicate.
+func TestWhatsApp_RedeliveryCountedAsDuplicate(t *testing.T) {
+	cfg := testConfig(t)
+	fx := newWAFixture()
+	fc := wasourcetest.New(fx.own)
+	src := wasource.NewWithClient(fc, testWAConfig(t))
+	h := startRun(t, cfg, Options{Sources: []LiveSource{src}, Triager: yesTriager{}, Extractor: &tripleExtractor{subject: "dup " + uuid.NewString()}})
+
+	e := waText(fx.contact, fx.contact, false, "said once")
+	fc.Emit(e)
+	fc.Emit(e)
+
+	st := src.Stats()
+	if st.Forwarded != 1 || st.Duplicates != 1 || st.SinkFailed != 0 {
+		t.Errorf("stats %+v, want forwarded=1 duplicates=1", st)
+	}
+	h.stop(t, cfg.ShutdownTimeout)
+
+	var n int
+	if err := dbConn(t, cfg).QueryRow(context.Background(), `SELECT count(*) FROM messages WHERE external_id = $1`, string(e.Info.ID)).Scan(&n); err != nil || n != 1 {
+		t.Errorf("rows = %d (%v), want 1", n, err)
+	}
+}

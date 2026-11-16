@@ -451,3 +451,39 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+func TestDuplicateCountedNotForwardedOrRetried(t *testing.T) {
+	fc := wasourcetest.New(ownJID)
+	rs := &sinkRecorder{err: func(int) error { return ingestion.ErrDuplicate }}
+	s, lb := startSource(t, fc, rs, Config{})
+	fc.Emit(msgEvent(contactPN, contactPN, false, textMsg("again")))
+	st := s.Stats()
+	if rs.n != 1 || st.Duplicates != 1 || st.Forwarded != 0 || st.SinkFailed != 0 || st.SinkRetries != 0 {
+		t.Errorf("attempts %d, stats %+v", rs.n, st)
+	}
+	if strings.Contains(lb.all(), "sink error") {
+		t.Errorf("a duplicate must not be logged as a sink error:\n%s", lb.all())
+	}
+}
+
+func TestLogoutClearsSession(t *testing.T) {
+	for name, tc := range map[string]struct {
+		evt   any
+		clear bool
+	}{
+		"logged_out":            {&events.LoggedOut{Reason: events.ConnectFailureLoggedOut}, true},
+		"connect_failure_403":   {&events.ConnectFailure{Reason: events.ConnectFailureMainDeviceGone}, true},
+		"stream_replaced":       {&events.StreamReplaced{}, false},
+		"temporary_ban":         {&events.TemporaryBan{Code: events.TempBanBlockedByUsers}, false},
+		"transient_failure_503": {&events.ConnectFailure{Reason: events.ConnectFailureServiceUnavailable}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fc := wasourcetest.New(ownJID)
+			startSource(t, fc, &sinkRecorder{}, Config{})
+			fc.Emit(tc.evt)
+			if got := fc.ClearedCount() > 0; got != tc.clear {
+				t.Errorf("session cleared = %v, want %v", got, tc.clear)
+			}
+		})
+	}
+}
