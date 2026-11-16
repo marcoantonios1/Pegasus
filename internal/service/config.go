@@ -16,6 +16,7 @@ import (
 
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 )
 
 // Config is the fully-resolved, validated service configuration. Build it
@@ -50,6 +51,14 @@ type Config struct {
 
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
+
+	LiveSinkTimeout time.Duration
+
+	WhatsAppEnabled              bool
+	WhatsAppSessionPath          string
+	WhatsAppReconnectBackoffBase time.Duration
+	WhatsAppReconnectBackoffMax  time.Duration
+	WhatsAppLogLevel             string
 }
 
 // ConfigFileEnv names the environment variable holding the optional
@@ -86,6 +95,10 @@ const (
 	DefaultDBConnectTimeout = 5 * time.Second
 	DefaultCostguardTimeout = 60 * time.Second // extraction.NewCostguardClient's HTTPClient.Timeout
 	DefaultCostguardURL     = "http://localhost:8080"
+	DefaultLiveSinkTimeout  = 5 * time.Minute
+	// DefaultWhatsAppSessionPath is for host runs; docker-compose.yml sets
+	// /var/lib/pegasus/whatsmeow/session.db on a dedicated named volume.
+	DefaultWhatsAppSessionPath = "~/.pegasus/whatsmeow/session.db"
 )
 
 // settings is THE configuration table. Order is the order of the
@@ -185,6 +198,46 @@ var settings = []setting{
 			}
 			c.ShutdownTimeout = d
 			return nil
+		}},
+
+	{Env: "PEGASUS_LIVE_SINK_TIMEOUT", Default: DefaultLiveSinkTimeout.String(),
+		Desc: "Per-message bound on api.ProcessLiveMessage when a live source delivers a message (it may run a window's triage+extraction+embedding inline). A message that times out after being stored stays processed=false and is recovered on next start.",
+		apply: func(c *Config, v string) (err error) { c.LiveSinkTimeout, err = parsePositiveDuration(v); return }},
+
+	{Env: "PEGASUS_WHATSAPP_ENABLED", Default: "false",
+		Desc: "Run the live WhatsApp source (whatsmeow). Requires a paired session: with no paired device the service exits 2 telling you to run `docker compose run --rm pegasus pair`.",
+		apply: func(c *Config, v string) (err error) { c.WhatsAppEnabled, err = strconv.ParseBool(v); return }},
+	{Env: "PEGASUS_WHATSAPP_SESSION_PATH", Default: DefaultWhatsAppSessionPath,
+		Desc: "whatsmeow session database (SQLite). A credential: must resolve outside the git repo; created 0600 in a 0700 directory. docker-compose.yml uses /var/lib/pegasus/whatsmeow/session.db on the whatsmeow_session volume.",
+		apply: func(c *Config, v string) error { c.WhatsAppSessionPath = v; return requireNonEmpty(v) }},
+	{Env: "PEGASUS_WHATSAPP_RECONNECT_BACKOFF_BASE", Default: "2s",
+		Desc: "First wait between supervised reconnect attempts (after whatsmeow's own auto-reconnect has had 30s); doubles per attempt, ±20% jitter.",
+		apply: func(c *Config, v string) (err error) {
+			c.WhatsAppReconnectBackoffBase, err = parsePositiveDuration(v)
+			return
+		}},
+	{Env: "PEGASUS_WHATSAPP_RECONNECT_BACKOFF_MAX", Default: "5m0s",
+		Desc: "Cap on the reconnect backoff. Reconnecting continues indefinitely at this interval.",
+		apply: func(c *Config, v string) error {
+			d, err := parsePositiveDuration(v)
+			if err != nil {
+				return err
+			}
+			if c.WhatsAppReconnectBackoffBase > 0 && d < c.WhatsAppReconnectBackoffBase {
+				return fmt.Errorf("must be >= PEGASUS_WHATSAPP_RECONNECT_BACKOFF_BASE")
+			}
+			c.WhatsAppReconnectBackoffMax = d
+			return nil
+		}},
+	{Env: "PEGASUS_WHATSAPP_LOG_LEVEL", Default: "INFO",
+		Desc: "whatsmeow's own log level: DEBUG, INFO, WARN or ERROR. Avoid DEBUG: it can print message payloads.",
+		apply: func(c *Config, v string) error {
+			switch u := strings.ToUpper(v); u {
+			case "DEBUG", "INFO", "WARN", "ERROR":
+				c.WhatsAppLogLevel = u
+				return nil
+			}
+			return fmt.Errorf("must be DEBUG, INFO, WARN or ERROR")
 		}},
 }
 
@@ -395,6 +448,25 @@ func (c *Config) displayValues() map[string]string {
 
 		"PEGASUS_HTTP_ADDR":        c.HTTPAddr,
 		"PEGASUS_SHUTDOWN_TIMEOUT": c.ShutdownTimeout.String(),
+
+		"PEGASUS_LIVE_SINK_TIMEOUT": c.LiveSinkTimeout.String(),
+
+		"PEGASUS_WHATSAPP_ENABLED":                strconv.FormatBool(c.WhatsAppEnabled),
+		"PEGASUS_WHATSAPP_SESSION_PATH":           c.WhatsAppSessionPath,
+		"PEGASUS_WHATSAPP_RECONNECT_BACKOFF_BASE": c.WhatsAppReconnectBackoffBase.String(),
+		"PEGASUS_WHATSAPP_RECONNECT_BACKOFF_MAX":  c.WhatsAppReconnectBackoffMax.String(),
+		"PEGASUS_WHATSAPP_LOG_LEVEL":              c.WhatsAppLogLevel,
+	}
+}
+
+// WhatsAppConfig is the wasource configuration derived from c.
+func (c *Config) WhatsAppConfig(logf func(string, ...any)) wasource.Config {
+	return wasource.Config{
+		SessionPath:          c.WhatsAppSessionPath,
+		LogLevel:             c.WhatsAppLogLevel,
+		ReconnectBackoffBase: c.WhatsAppReconnectBackoffBase,
+		ReconnectBackoffMax:  c.WhatsAppReconnectBackoffMax,
+		Logf:                 logf,
 	}
 }
 
