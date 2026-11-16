@@ -64,6 +64,8 @@ type Options struct {
 // Lifecycle events passed to Options.OnEvent.
 const (
 	EventSnapshotTaken   = "snapshot_taken"
+	EventFlusherStarted  = "flusher_started"
+	EventRecoveryStarted = "recovery_started"
 	EventReady           = "ready"
 	EventHTTPStopped     = "http_stopped"
 	EventSourceStopped   = "source_stopped:" // + source name
@@ -295,6 +297,7 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 	flusherCtx, cancelFlusher := context.WithCancel(context.Background())
 	sd.cancelFlusher = cancelFlusher
 	sd.flushDone = a.StartLiveWindowFlusher(flusherCtx)
+	emit(EventFlusherStarted)
 
 	// --- Health server ---
 	ln, err := net.Listen("tcp", cfg.HTTPAddr)
@@ -330,6 +333,7 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		recCtx, cancelRec := context.WithCancel(context.Background())
 		recDone := make(chan struct{})
 		sd.cancelRecovery, sd.recoveryDone = cancelRec, recDone
+		emit(EventRecoveryStarted)
 		go func() {
 			defer close(recDone)
 			stats, err := a.ProcessRecoveredMessages(recCtx, snapshot)

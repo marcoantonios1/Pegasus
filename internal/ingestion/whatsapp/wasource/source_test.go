@@ -15,93 +15,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource/wasourcetest"
 )
-
-// FakeClient is an in-memory Client: Emit delivers an event to the
-// registered handlers synchronously, as whatsmeow's own dispatch does.
-type fakeClient struct {
-	mu            sync.Mutex
-	handlers      []func(any)
-	own           types.JID
-	lids          map[types.JID]types.JID
-	connects      int
-	connectErr    func(n int) error // nil -> success
-	emitOnConnect bool              // emit Connected after a successful Connect
-	disconnects   int
-	autoReconnect bool
-	record        func(string)
-}
-
-func newFakeClient(own types.JID) *fakeClient {
-	return &fakeClient{own: own, lids: map[types.JID]types.JID{}, autoReconnect: true, emitOnConnect: true}
-}
-
-func (f *fakeClient) rec(e string) {
-	if f.record != nil {
-		f.record(e)
-	}
-}
-
-func (f *fakeClient) AddEventHandler(h func(any)) uint32 {
-	f.mu.Lock()
-	f.handlers = append(f.handlers, h)
-	f.mu.Unlock()
-	f.rec("add_handler")
-	return 1
-}
-
-func (f *fakeClient) Connect() error {
-	f.mu.Lock()
-	f.connects++
-	n := f.connects
-	errFn, emit := f.connectErr, f.emitOnConnect
-	f.mu.Unlock()
-	f.rec("connect")
-	if errFn != nil {
-		if err := errFn(n); err != nil {
-			return err
-		}
-	}
-	if emit {
-		f.Emit(&events.Connected{})
-	}
-	return nil
-}
-
-func (f *fakeClient) Disconnect() {
-	f.mu.Lock()
-	f.disconnects++
-	f.mu.Unlock()
-	f.rec("disconnect")
-}
-
-func (f *fakeClient) IsConnected() bool { return true }
-func (f *fakeClient) OwnJID() types.JID { return f.own }
-func (f *fakeClient) PNForLID(_ context.Context, lid types.JID) (types.JID, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.lids[lid], nil
-}
-func (f *fakeClient) DisableAutoReconnect() {
-	f.mu.Lock()
-	f.autoReconnect = false
-	f.mu.Unlock()
-}
-
-func (f *fakeClient) Emit(evt any) {
-	f.mu.Lock()
-	hs := append([]func(any){}, f.handlers...)
-	f.mu.Unlock()
-	for _, h := range hs {
-		h(evt)
-	}
-}
-
-func (f *fakeClient) connectCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.connects
-}
 
 // --- event builders ---
 
@@ -173,7 +88,7 @@ func (l *logBuf) all() string {
 	return strings.Join(l.lines, "\n")
 }
 
-func startSource(t *testing.T, fc *fakeClient, rs *sinkRecorder, cfg Config) (*Source, *logBuf) {
+func startSource(t *testing.T, fc *wasourcetest.FakeClient, rs *sinkRecorder, cfg Config) (*Source, *logBuf) {
 	t.Helper()
 	lb := &logBuf{}
 	cfg.Logf = lb.logf
@@ -198,7 +113,7 @@ func startSource(t *testing.T, fc *fakeClient, rs *sinkRecorder, cfg Config) (*S
 // --- tests ---
 
 func TestDropsAndForwards(t *testing.T) {
-	fc := newFakeClient(ownJID)
+	fc := wasourcetest.New(ownJID)
 	rs := &sinkRecorder{}
 	s, lb := startSource(t, fc, rs, Config{})
 
@@ -264,9 +179,9 @@ func TestOtherEventKeysCapped(t *testing.T) {
 }
 
 func TestCanonicalization(t *testing.T) {
-	fc := newFakeClient(ownJID)
+	fc := wasourcetest.New(ownJID)
 	mappedLID := types.NewJID("11112222", types.HiddenUserServer)
-	fc.lids[mappedLID] = contactPN
+	fc.LIDs[mappedLID] = contactPN
 	rs := &sinkRecorder{}
 	s, _ := startSource(t, fc, rs, Config{})
 
@@ -316,8 +231,8 @@ func TestCanonicalization(t *testing.T) {
 }
 
 func TestReconnect_AfterDisconnect(t *testing.T) {
-	fc := newFakeClient(ownJID)
-	fc.connectErr = func(n int) error {
+	fc := wasourcetest.New(ownJID)
+	fc.ConnectErr = func(n int) error {
 		if n == 2 { // first supervised attempt fails
 			return errors.New("dial: network down")
 		}
@@ -329,7 +244,7 @@ func TestReconnect_AfterDisconnect(t *testing.T) {
 	}
 
 	fc.Emit(&events.Disconnected{})
-	waitFor(t, func() bool { return healthState(s) == StateConnected && fc.connectCount() == 3 }, "reconnect")
+	waitFor(t, func() bool { return healthState(s) == StateConnected && fc.ConnectCount() == 3 }, "reconnect")
 
 	ready, _, info := s.Health()
 	m := info.(map[string]any)
@@ -342,8 +257,8 @@ func TestReconnect_AfterDisconnect(t *testing.T) {
 }
 
 func TestReconnect_TransientDisconnectStaysReady(t *testing.T) {
-	fc := newFakeClient(ownJID)
-	fc.connectErr = func(n int) error {
+	fc := wasourcetest.New(ownJID)
+	fc.ConnectErr = func(n int) error {
 		if n > 1 {
 			return errors.New("still down")
 		}
@@ -357,7 +272,7 @@ func TestReconnect_TransientDisconnectStaysReady(t *testing.T) {
 }
 
 func TestBackoffWaitInterruptedByCancel(t *testing.T) {
-	s := NewWithClient(newFakeClient(ownJID), Config{ReconnectBackoffBase: time.Hour, ReconnectBackoffMax: time.Hour, ReconnectGrace: time.Hour, Logf: t.Logf})
+	s := NewWithClient(wasourcetest.New(ownJID), Config{ReconnectBackoffBase: time.Hour, ReconnectBackoffMax: time.Hour, ReconnectGrace: time.Hour, Logf: t.Logf})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.supervise(ctx); close(done) }()
@@ -376,7 +291,7 @@ func TestBackoffWaitInterruptedByCancel(t *testing.T) {
 }
 
 func TestBackoffCappedWithJitter(t *testing.T) {
-	s := NewWithClient(newFakeClient(ownJID), Config{ReconnectBackoffBase: time.Second, ReconnectBackoffMax: 10 * time.Second, Logf: t.Logf})
+	s := NewWithClient(wasourcetest.New(ownJID), Config{ReconnectBackoffBase: time.Second, ReconnectBackoffMax: 10 * time.Second, Logf: t.Logf})
 	s.jitter = func() float64 { return 0.5 } // midpoint: no jitter
 	for attempt, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second} {
 		if got := s.backoff(attempt); got != want {
@@ -399,7 +314,7 @@ func TestFatalStates(t *testing.T) {
 	}
 	for name, evt := range cases {
 		t.Run(name, func(t *testing.T) {
-			fc := newFakeClient(ownJID)
+			fc := wasourcetest.New(ownJID)
 			s, lb := startSource(t, fc, &sinkRecorder{}, Config{})
 			fc.Emit(evt)
 			fc.Emit(&events.Disconnected{}) // what whatsmeow does next
@@ -409,10 +324,10 @@ func TestFatalStates(t *testing.T) {
 			if ready || !strings.Contains(reason, name) {
 				t.Errorf("health: ready=%v reason=%q", ready, reason)
 			}
-			if fc.connectCount() != 1 {
-				t.Errorf("reconnect attempted after fatal state: %d connects", fc.connectCount())
+			if fc.ConnectCount() != 1 {
+				t.Errorf("reconnect attempted after fatal state: %d connects", fc.ConnectCount())
 			}
-			if fc.autoReconnect {
+			if fc.AutoReconnectEnabled() {
 				t.Error("whatsmeow auto-reconnect left enabled")
 			}
 			if c := strings.Count(lb.all(), "ERROR: fatal state"); c != 1 {
@@ -426,7 +341,7 @@ func TestFatalStates(t *testing.T) {
 	}
 
 	// Transient connect failures are not fatal.
-	fc := newFakeClient(ownJID)
+	fc := wasourcetest.New(ownJID)
 	s, _ := startSource(t, fc, &sinkRecorder{}, Config{})
 	fc.Emit(&events.ConnectFailure{Reason: events.ConnectFailureServiceUnavailable})
 	if ready, _, _ := s.Health(); !ready {
@@ -436,7 +351,7 @@ func TestFatalStates(t *testing.T) {
 
 func TestSinkRetry(t *testing.T) {
 	t.Run("transient error retried", func(t *testing.T) {
-		fc := newFakeClient(ownJID)
+		fc := wasourcetest.New(ownJID)
 		rs := &sinkRecorder{err: func(n int) error {
 			if n == 1 {
 				return errors.New("db blip")
@@ -451,7 +366,7 @@ func TestSinkRetry(t *testing.T) {
 		}
 	})
 	t.Run("persistent error counted and logged without content", func(t *testing.T) {
-		fc := newFakeClient(ownJID)
+		fc := wasourcetest.New(ownJID)
 		rs := &sinkRecorder{err: func(int) error {
 			return fmt.Errorf("resolve sender %q: boom", contactPN.String())
 		}}
@@ -471,7 +386,7 @@ func TestSinkRetry(t *testing.T) {
 		}
 	})
 	t.Run("closed sink not retried", func(t *testing.T) {
-		fc := newFakeClient(ownJID)
+		fc := wasourcetest.New(ownJID)
 		rs := &sinkRecorder{err: func(int) error { return ingestion.ErrSinkClosed }}
 		s, _ := startSource(t, fc, rs, Config{})
 		fc.Emit(msgEvent(contactPN, contactPN, false, textMsg("x")))
@@ -482,7 +397,7 @@ func TestSinkRetry(t *testing.T) {
 }
 
 func TestStop_DrainsInFlightThenRejects(t *testing.T) {
-	fc := newFakeClient(ownJID)
+	fc := wasourcetest.New(ownJID)
 	entered, release := make(chan struct{}), make(chan struct{})
 	rs := &sinkRecorder{err: func(n int) error {
 		if n == 1 {
@@ -516,8 +431,8 @@ func TestStop_DrainsInFlightThenRejects(t *testing.T) {
 	if len(rs.got()) != 1 || s.Stats().Dropped[DropAfterStop] != 1 {
 		t.Errorf("event after Stop was not rejected: %+v", s.Stats())
 	}
-	if fc.disconnects != 1 {
-		t.Errorf("Stop should disconnect once, got %d", fc.disconnects)
+	if fc.DisconnectCount() != 1 {
+		t.Errorf("Stop should disconnect once, got %d", fc.DisconnectCount())
 	}
 }
 
