@@ -75,7 +75,7 @@ func TestFlushIdleWindows_FailingExtractorThenRecovery(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	failing := &failingExtractor{err: errors.New("extraction backend unavailable")}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: failing, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: failing, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "failing-flush-conv-" + uuid.New().String()
@@ -111,7 +111,7 @@ func TestFlushIdleWindows_FailingExtractorThenRecovery(t *testing.T) {
 	working := &fakeExtractor{triples: []extraction.ExtractedTriple{
 		{Subject: "Failing Extractor Recovery Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
-	a.WithPipeline(PipelineDeps{Triager: triager, Extractor: working, LiveWindowFlushAfter: 5 * time.Minute})
+	a.WithPipeline(PipelineDeps{Triager: triager, Extractor: working, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t)
 
 	mine := snapshotMine(t, ctx, a, externalID1, externalID2)
 	if len(mine) != 2 {
@@ -164,7 +164,7 @@ func TestRecoverUnprocessedLive(t *testing.T) {
 		{Subject: "Recovery Sweep Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor})
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor}).withTestSelf(t)
 
 	senderA := createTestEntity(t, ctx, ts, "person", "Recovery Sender A "+uuid.New().String())
 	senderB := createTestEntity(t, ctx, ts, "person", "Recovery Sender B "+uuid.New().String())
@@ -375,7 +375,7 @@ func TestRecoverUnprocessedLive_NeverCallsRecordActivity(t *testing.T) {
 	}}
 	recorder := &fakeActivityRecorder{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, ActivityRecorder: recorder})
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, ActivityRecorder: recorder}).withTestSelf(t)
 
 	sender := createTestEntity(t, ctx, ts, "person", "Recovery No Activity Sender "+uuid.New().String())
 	convID := uuid.New()

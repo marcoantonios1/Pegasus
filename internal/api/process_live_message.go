@@ -180,7 +180,7 @@ func (a *API) processLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 
 	conversationID := resolveConversationID(rawMsg.Platform, rawMsg.ConversationID)
 
-	sender, err := a.resolveSender(ctx, rawMsg.SenderExternalID)
+	sender, err := a.resolveSender(ctx, rawMsg.Platform, rawMsg.SenderExternalID)
 	if err != nil {
 		return fmt.Errorf("ProcessLiveMessage: resolve sender: %w", err)
 	}
@@ -267,7 +267,7 @@ func (a *API) processLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		a.liveWindows[conversationID] = state
 	}
 
-	wm := extraction.WindowMessage{Speaker: rawMsg.SenderExternalID, Timestamp: rawMsg.Timestamp, Text: text}
+	wm := extraction.WindowMessage{Speaker: a.speakerLabel(sender, rawMsg.SenderExternalID), Timestamp: rawMsg.Timestamp, Text: text}
 	completed, ready := state.windower.Add(wm)
 	state.pendingIDs = append(state.pendingIDs, msg.ID)
 	state.pendingMediaTypes = append(state.pendingMediaTypes, rawMsg.MediaType)

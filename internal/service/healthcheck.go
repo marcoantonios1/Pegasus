@@ -19,7 +19,7 @@ func ResolveHTTPAddr(lookupEnv func(string) (string, bool), configPath string) (
 	if configPath == "" {
 		configPath, _ = lookupEnv(ConfigFileEnv)
 	}
-	var fileVals map[string]string
+	var fileVals map[string]fileValue
 	if configPath != "" {
 		var err error
 		if fileVals, err = readConfigFile(configPath); err != nil {
@@ -32,7 +32,9 @@ func ResolveHTTPAddr(lookupEnv func(string) (string, bool), configPath string) (
 		}
 		v, ok := lookupEnv(s.Env)
 		if !ok {
-			v, ok = fileVals[s.FileKey()]
+			var fv fileValue
+			fv, ok = fileVals[s.FileKey()]
+			v = fv.scalar
 		}
 		if !ok {
 			v = s.Default

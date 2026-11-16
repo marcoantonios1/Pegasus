@@ -139,7 +139,9 @@ func pair(args []string, stdout, stderr io.Writer, lookupEnv func(string) (strin
 	if err := fs.Parse(args); err != nil {
 		return exitConfig
 	}
-	cfg, err := service.LoadConfig(lookupEnv, *configPath)
+	// Pairing never ingests, so it doesn't need (or check) the self
+	// identity: you may only learn which JID to configure by pairing.
+	cfg, err := service.LoadConfig(lookupEnv, *configPath, service.WithoutSelfIdentity())
 	if err != nil {
 		fmt.Fprintf(stderr, "pegasus pair: %v\n", err)
 		return exitConfig

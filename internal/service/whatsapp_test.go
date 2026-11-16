@@ -209,6 +209,7 @@ func TestWhatsApp_MessagesInEdgesOut_Ordering(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RecoverOnStart = true
 	fx := newWAFixture()
+	cfg.Identity = testRegistry(t, fx.ownPN.String()) // the fake account must be a configured identity
 	rec := &recorder{}
 	fc := wasourcetest.New(fx.own)
 	fc.Record = func(e string) { rec.add("client_" + e) }
@@ -283,14 +284,19 @@ func TestWhatsApp_RestartMidWindow(t *testing.T) {
 	cfg := testConfig(t)
 	pool := testPool(t, cfg)
 	fx := newWAFixture()
+	cfg.Identity = testRegistry(t, fx.ownPN.String()) // the fake account must be a configured identity
 	newAPI := func() *api.API {
-		return api.New(memory.NewEdgeStore(pool), memory.NewMessageStore(pool), memory.NewEntityStore(pool),
+		a := api.New(memory.NewEdgeStore(pool), memory.NewMessageStore(pool), memory.NewEntityStore(pool),
 			memory.NewEmbeddingStore(pool), memory.NewRelationshipStatsStore(pool), nil).
 			WithPipeline(api.PipelineDeps{
 				Triager: yesTriager{}, Extractor: &tripleExtractor{subject: "WA restart subject " + uuid.NewString()},
-				SelfExternalIDs: []string{fx.ownPN.String()}, Logger: t.Logf,
+				Logger:               t.Logf,
 				LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: time.Hour,
 			})
+		if _, err := a.BootstrapSelf(context.Background(), testRegistry(t, fx.ownPN.String())); err != nil {
+			t.Fatalf("BootstrapSelf: %v", err)
+		}
+		return a
 	}
 
 	a1 := newAPI()
@@ -351,6 +357,7 @@ func TestWhatsApp_FatalStateFailsReadiness(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := testConfig(t)
 			fx := newWAFixture()
+			cfg.Identity = testRegistry(t, fx.ownPN.String()) // the fake account must be a configured identity
 			fc := wasourcetest.New(fx.own)
 			src := wasource.NewWithClient(fc, testWAConfig(t))
 			h := startRun(t, cfg, Options{Sources: []LiveSource{src}, Triager: yesTriager{}, Extractor: &tripleExtractor{subject: "x"}})
@@ -406,10 +413,14 @@ func TestWhatsApp_SinkRetryIdempotent(t *testing.T) {
 	cfg := testConfig(t)
 	pool := testPool(t, cfg)
 	fx := newWAFixture()
+	cfg.Identity = testRegistry(t, fx.ownPN.String()) // the fake account must be a configured identity
 	a := api.New(memory.NewEdgeStore(pool), memory.NewMessageStore(pool), memory.NewEntityStore(pool),
 		memory.NewEmbeddingStore(pool), memory.NewRelationshipStatsStore(pool), nil).
 		WithPipeline(api.PipelineDeps{Triager: yesTriager{}, Extractor: &tripleExtractor{subject: "x"}, Logger: t.Logf,
 			LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: time.Hour})
+	if _, err := a.BootstrapSelf(context.Background(), testRegistry(t, fx.ownPN.String())); err != nil {
+		t.Fatalf("BootstrapSelf: %v", err)
+	}
 
 	fc := wasourcetest.New(fx.own)
 	src := wasource.NewWithClient(fc, testWAConfig(t))
@@ -448,6 +459,7 @@ func TestWhatsApp_SinkRetryIdempotent(t *testing.T) {
 func TestWhatsApp_RedeliveryCountedAsDuplicate(t *testing.T) {
 	cfg := testConfig(t)
 	fx := newWAFixture()
+	cfg.Identity = testRegistry(t, fx.ownPN.String()) // the fake account must be a configured identity
 	fc := wasourcetest.New(fx.own)
 	src := wasource.NewWithClient(fc, testWAConfig(t))
 	h := startRun(t, cfg, Options{Sources: []LiveSource{src}, Triager: yesTriager{}, Extractor: &tripleExtractor{subject: "dup " + uuid.NewString()}})

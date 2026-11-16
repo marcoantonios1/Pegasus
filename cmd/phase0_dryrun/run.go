@@ -17,6 +17,7 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 	"github.com/marcoantonios1/Pegasus/internal/reportpath"
+	"github.com/marcoantonios1/Pegasus/internal/service"
 )
 
 // productionDBName is the database name docker-compose.yml's real
@@ -56,6 +57,14 @@ func runRun(args []string) error {
 	}
 	if err := reportpath.EnsureOutsideRepo(*out); err != nil {
 		return err
+	}
+
+	// The same self identity the service uses (PEGASUS_SELF_*, env or
+	// PEGASUS_CONFIG_FILE). Checked before touching any database: without
+	// it Marco's own messages would be attributed to a contact entity.
+	selfReg, err := service.LoadSelfIdentity(os.LookupEnv, "")
+	if err != nil {
+		return fmt.Errorf("self identity: %w", err)
 	}
 
 	ctx := context.Background()
@@ -124,6 +133,10 @@ func runRun(args []string) error {
 		// internal/api/import_whatsapp.go's localExportAudioFetcher) — a
 		// dry-run-specific one would just duplicate that.
 	})
+
+	if _, err := a.BootstrapSelf(ctx, selfReg); err != nil {
+		return fmt.Errorf("bootstrap self identity: %w", err)
+	}
 
 	// Margin around the run's actual [start, end) so Costguard's own
 	// request timestamps (a different process, potentially a different

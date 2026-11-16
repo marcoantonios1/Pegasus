@@ -24,6 +24,7 @@ import (
 	"github.com/marcoantonios1/Pegasus/db"
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/identity"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
@@ -64,23 +65,28 @@ type Options struct {
 
 // Lifecycle events passed to Options.OnEvent.
 const (
-	EventSnapshotTaken   = "snapshot_taken"
-	EventFlusherStarted  = "flusher_started"
-	EventRecoveryStarted = "recovery_started"
-	EventReady           = "ready"
-	EventHTTPStopped     = "http_stopped"
-	EventSourceStopped   = "source_stopped:" // + source name
-	EventIntakeDrained   = "intake_drained"
-	EventRecoveryStopped = "recovery_stopped"
-	EventFlushDone       = "flush_done"
-	EventPoolClosed      = "pool_closed"
+	EventSelfBootstrapped = "self_bootstrapped"
+	EventSnapshotTaken    = "snapshot_taken"
+	EventFlusherStarted   = "flusher_started"
+	EventRecoveryStarted  = "recovery_started"
+	EventReady            = "ready"
+	EventHTTPStopped      = "http_stopped"
+	EventSourceStopped    = "source_stopped:" // + source name
+	EventIntakeDrained    = "intake_drained"
+	EventRecoveryStopped  = "recovery_stopped"
+	EventFlushDone        = "flush_done"
+	EventPoolClosed       = "pool_closed"
 )
 
 // Optional interfaces a LiveSource may implement.
 type (
-	// selfIdentifier contributes the account's own external IDs, merged
-	// into the pipeline's SelfExternalIDs (WhatsApp: the paired JID).
-	selfIdentifier interface{ SelfExternalIDs() []string }
+	// accountIdentifier reports the account a source is logged in as
+	// (WhatsApp: the paired JID). Run verifies it is a configured self
+	// identity; it never adds one implicitly.
+	accountIdentifier interface {
+		Platform() string
+		AccountID() string
+	}
 	// healthReporter feeds /readyz. ready=false makes the service unready
 	// (fatal source states only); info is informational JSON.
 	healthReporter interface {
@@ -116,6 +122,13 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 	for _, line := range cfg.Redacted() {
 		logf("pegasus:   %s", line)
 	}
+	if cfg.Identity == nil {
+		return &ConfigError{Problems: []string{"self identity is not configured (PEGASUS_SELF_NAME and at least one PEGASUS_SELF_WHATSAPP_IDS / PEGASUS_SELF_INSTAGRAM_NAMES entry)"}}
+	}
+	logf("pegasus: self identity: %q, %d alias(es), whatsapp=[%s], instagram=%d name(s)",
+		cfg.Identity.SelfName(), len(cfg.Identity.Aliases()),
+		strings.Join(redactIDs(cfg.Identity.Identities(identity.WhatsApp)), ";"), len(cfg.Identity.Identities(identity.Instagram)))
+
 	// --- Live sources: opened (not started) first, so an unpaired or
 	// misplaced WhatsApp session fails fast with exit code 2, before any
 	// database work. Started only after the recovery snapshot (below).
@@ -126,7 +139,7 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 			return &ConfigError{Problems: []string{fmt.Sprintf("WhatsApp source: %v", err)}}
 		}
 		sources = append(sources, wa)
-		logf("pegasus: WhatsApp session opened (paired as %s)", strings.Join(redactIDs(wa.SelfExternalIDs()), ","))
+		logf("pegasus: WhatsApp session opened (paired as %s)", strings.Join(redactIDs([]string{wa.AccountID()}), ""))
 	}
 	defer func() {
 		for _, src := range sources {
@@ -138,21 +151,18 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		}
 	}()
 
-	selfIDs := append([]string(nil), cfg.SelfExternalIDs...)
+	// A source's own account must be one of Marco's configured identities;
+	// otherwise his messages from it would be attributed to a contact.
+	var accountProblems []string
 	for _, src := range sources {
-		if si, ok := src.(selfIdentifier); ok {
-			selfIDs = mergeIDs(selfIDs, si.SelfExternalIDs())
+		if ai, ok := src.(accountIdentifier); ok && !cfg.Identity.IsSelf(ai.Platform(), ai.AccountID()) {
+			accountProblems = append(accountProblems, fmt.Sprintf(
+				"live source %q is logged in as %s, which is not in the configured %s self identities (PEGASUS_SELF_WHATSAPP_IDS); add that account (JID or phone number) or re-pair with Marco's own account",
+				src.Name(), strings.Join(redactIDs([]string{ai.AccountID()}), ""), ai.Platform()))
 		}
 	}
-	switch {
-	case len(selfIDs) == 0 && len(sources) == 0:
-		logf("pegasus: WARNING: PEGASUS_SELF_EXTERNAL_IDS is empty. Harmless while no live source is enabled, " +
-			"but once one is, Marco's own outgoing messages would be attributed to a contact entity instead of to him. " +
-			"Set it before enabling any live source.")
-	case len(selfIDs) == 0:
-		logf("pegasus: WARNING: no self external IDs (PEGASUS_SELF_EXTERNAL_IDS is empty and no live source supplied one): Marco's own messages would be attributed to a contact entity")
-	default:
-		logf("pegasus: self external IDs: %s", strings.Join(redactIDs(selfIDs), ","))
+	if len(accountProblems) > 0 {
+		return &ConfigError{Problems: accountProblems}
 	}
 
 	wantVersion, err := db.LatestMigrationVersion()
@@ -255,7 +265,6 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		Triager:          triager,
 		Extractor:        extractor,
 		ActivityRecorder: nil, // see TODO(reflection) above
-		SelfExternalIDs:  selfIDs,
 		Logger:           logf,
 		Transcriber:      client,
 		AudioFetcher:     nil, // see TODO(live-audio) above
@@ -267,6 +276,21 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		LiveWindowFlushAfter:        cfg.LiveWindowFlushAfter,
 		LiveWindowFlushPollInterval: cfg.LiveWindowFlushPollInterval,
 	})
+
+	// --- Self identity: bound to the single is_self entity BEFORE recovery
+	// or intake can resolve any sender. A conflict is an operator decision
+	// (no auto-repair), so it exits 2 like a configuration error.
+	self, err := a.BootstrapSelf(ctx, cfg.Identity)
+	if err != nil {
+		sd.run()
+		var sc *api.SelfConflictError
+		if errors.As(err, &sc) {
+			return &ConfigError{Problems: sc.Problems}
+		}
+		return fmt.Errorf("bootstrap self identity: %w", err)
+	}
+	logf("pegasus: self entity %s (%q) bootstrapped", self.ID, self.CanonicalName)
+	emit(EventSelfBootstrapped)
 
 	// --- Recovery snapshot: synchronously, BEFORE any intake starts, so a
 	// live message can never be both in the snapshot and in a live window.
@@ -529,21 +553,6 @@ func (s *shutdownState) run() error {
 		return ErrShutdownIncomplete
 	}
 	return nil
-}
-
-// mergeIDs appends ids not already present in base.
-func mergeIDs(base, ids []string) []string {
-	seen := make(map[string]bool, len(base))
-	for _, id := range base {
-		seen[id] = true
-	}
-	for _, id := range ids {
-		if !seen[id] {
-			seen[id] = true
-			base = append(base, id)
-		}
-	}
-	return base
 }
 
 // redactIDs shortens external IDs (phone-number JIDs) for logs.

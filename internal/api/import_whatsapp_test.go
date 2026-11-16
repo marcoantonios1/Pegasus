@@ -178,7 +178,7 @@ func TestImportWhatsApp_PathTraversalAttachmentDoesNotLeakFile(t *testing.T) {
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor, Transcriber: transcriber,
-	})
+	}).withTestSelf(t)
 
 	result, err := a.ImportWhatsApp(ctx, exportPath)
 	if err != nil {

@@ -35,8 +35,7 @@ func TestSelfIdentity_ImportAndLiveBothResolveToSameSelfEntity(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	extractor := &fakeExtractor{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		Triager: triager, Extractor: extractor, SelfExternalIDs: []string{selfExternalID},
-	})
+		Triager: triager, Extractor: extractor}).withTestSelf(t, selfExternalID)
 
 	// --- Import path: a real WhatsApp export file, sender name == the
 	// configured self external ID. ---

@@ -187,15 +187,13 @@ func (s *Source) Name() string { return "whatsapp" }
 // Stats exposes the counters (tests and health).
 func (s *Source) Stats() StatsSnapshot { return s.stats.Snapshot() }
 
-// SelfExternalIDs returns the account's own canonical JID. The service
-// merges it into the pipeline's SelfExternalIDs so the IsFromMe sender
-// rewrite in canonicalizer.apply matches resolveSender exactly.
-func (s *Source) SelfExternalIDs() []string {
-	if s.canon.self.IsEmpty() {
-		return nil
-	}
-	return []string{s.canon.self.String()}
-}
+// Platform and AccountID identify the paired account. The service checks
+// AccountID against the configured WhatsApp self identities and refuses to
+// start if it is not one of them (it is never added implicitly). The
+// canonicalizer rewrites the sender of every IsFromMe message to this JID.
+func (s *Source) Platform() string { return "whatsapp" }
+
+func (s *Source) AccountID() string { return s.canon.self.String() }
 
 // Start registers the event handler, then connects. A failed initial
 // connect is treated as transient (the supervisor keeps retrying); only a

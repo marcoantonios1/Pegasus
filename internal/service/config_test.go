@@ -13,7 +13,18 @@ import (
 
 const testSecret = "s3cr3t-do-not-print-7f9a"
 
+// envMap is the environment m plus a valid self identity unless m sets
+// one itself (most tests are about other settings).
 func envMap(m map[string]string) func(string) (string, bool) {
+	full := map[string]string{"PEGASUS_SELF_NAME": "Marco", "PEGASUS_SELF_WHATSAPP_IDS": "+961 70 123 456"}
+	for k, v := range m {
+		full[k] = v
+	}
+	return rawEnvMap(full)
+}
+
+// rawEnvMap is exactly m.
+func rawEnvMap(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
 		v, ok := m[k]
 		return v, ok
@@ -54,7 +65,11 @@ func TestLoadConfig_DefaultsApply(t *testing.T) {
 		{"RecoverOnStart", cfg.RecoverOnStart, true},
 		{"HTTPAddr", cfg.HTTPAddr, DefaultHTTPAddr},
 		{"ShutdownTimeout", cfg.ShutdownTimeout, DefaultShutdownTimeout},
-		{"SelfExternalIDs", len(cfg.SelfExternalIDs), 0},
+		{"SelfName", cfg.SelfName, "Marco"},
+		{"SelfWhatsApp", strings.Join(cfg.SelfWhatsApp, ";"), "96170123456@s.whatsapp.net"},
+		{"SelfAliases", len(cfg.SelfAliases), 0},
+		{"SelfInstagram", len(cfg.SelfInstagram), 0},
+		{"Identity", cfg.Identity != nil, true},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -145,10 +160,11 @@ func TestLoadConfig_SecretNeverInErrorsOrDump(t *testing.T) {
 }
 
 func TestLoadConfig_EnvOverridesFile(t *testing.T) {
-	p := writeFile(t, `{"db_host": "from-file", "db_port": 6543, "recover_on_start": false, "self_external_ids": "a@s.whatsapp.net, b@s.whatsapp.net"}`)
-	cfg, err := LoadConfig(envMap(map[string]string{
+	p := writeFile(t, `{"db_host": "from-file", "db_port": 6543, "recover_on_start": false, "self_whatsapp_ids": ["+961 70 123 456", "Marco, from export"]}`)
+	cfg, err := LoadConfig(rawEnvMap(map[string]string{
 		"POSTGRES_PASSWORD": testSecret,
 		"PEGASUS_DB_HOST":   "from-env",
+		"PEGASUS_SELF_NAME": "Marco",
 	}), p)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -159,12 +175,12 @@ func TestLoadConfig_EnvOverridesFile(t *testing.T) {
 	if cfg.DBPort != 6543 || cfg.RecoverOnStart {
 		t.Errorf("file values should apply where env is unset: port=%d recover=%v", cfg.DBPort, cfg.RecoverOnStart)
 	}
-	if len(cfg.SelfExternalIDs) != 2 || cfg.SelfExternalIDs[1] != "b@s.whatsapp.net" {
-		t.Errorf("SelfExternalIDs: %v", cfg.SelfExternalIDs)
+	if got := strings.Join(cfg.SelfWhatsApp, ";"); got != "96170123456@s.whatsapp.net;Marco, from export" {
+		t.Errorf("self whatsapp ids from the file (array, commas kept): %q", got)
 	}
 
 	// PEGASUS_CONFIG_FILE is honored when no --config path is given.
-	cfg, err = LoadConfig(envMap(map[string]string{"POSTGRES_PASSWORD": testSecret, ConfigFileEnv: p}), "")
+	cfg, err = LoadConfig(rawEnvMap(map[string]string{"POSTGRES_PASSWORD": testSecret, "PEGASUS_SELF_NAME": "Marco", ConfigFileEnv: p}), "")
 	if err != nil || cfg.DBHost != "from-file" {
 		t.Fatalf("PEGASUS_CONFIG_FILE not honored: %v %+v", err, cfg)
 	}

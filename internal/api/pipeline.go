@@ -50,30 +50,30 @@ func resolveConversationID(platform, externalConversationID string) uuid.UUID {
 // unify. A real identity-resolution/linking step across those namespaces
 // is out of this issue's scope — flagged here rather than silently
 // producing duplicate entities without explanation.
-func (a *API) resolveSender(ctx context.Context, senderExternalID string) (*memory.Entity, error) {
-	if a.selfExternalIDs[senderExternalID] {
-		// GetOrCreateSelf, not GetSelf-then-Create: the entity-resolution
-		// race fix. The old shape — look up the self entity, create one
-		// if missing — had no uniqueness enforced between those two
-		// steps, so two concurrent live messages/imports both
-		// classified as self (plausible: a resumed import running
-		// alongside live ingestion, both seeing Marco's own sender ID
-		// for the first time) could both find no self entity yet and
-		// both try to create one. entities_single_self_idx (migration
-		// 000001) already rejects the second CREATE outright, so this
-		// wasn't silently producing two is_self rows — it was surfacing
-		// as a raw unique-violation error from whichever caller lost
-		// the race, with no recovery. GetOrCreateSelf resolves that race
-		// internally (see its own doc comment) and returns the same
-		// entity to both callers either way.
-		self, err := a.entities.GetOrCreateSelf(ctx, senderExternalID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve self entity: %w", err)
-		}
-		return self, nil
+func (a *API) resolveSender(ctx context.Context, platform, senderExternalID string) (*memory.Entity, error) {
+	if a.identity == nil || a.self == nil {
+		return nil, errSelfNotBootstrapped
+	}
+	if a.identity.IsSelf(platform, senderExternalID) {
+		return a.self, nil
 	}
 
-	return a.resolveEntity(ctx, senderExternalID, "person")
+	// Not one of Marco's identities on THIS platform. Resolve by name
+	// WITHOUT the self-name mapping resolveEntity applies to extracted
+	// subjects: a contact who happens to be called "Marco" must never be
+	// attributed to him (that would also hand them correction authority).
+	e, _, err := a.entities.GetOrCreateByCanonicalName(ctx, senderExternalID, "person")
+	if err != nil {
+		return nil, fmt.Errorf("resolve sender: %w", err)
+	}
+	if e.IsSelf {
+		// The case-insensitive canonical_name index made this unconfigured
+		// sender collide with the self entity's name. Refuse rather than
+		// misattribute; the operator decides whether it really is Marco.
+		return nil, fmt.Errorf("resolve sender: %s sender %q is not a configured self identity but its name collides with the self entity %q; refusing to attribute it to Marco (add it to the %s self identities if it is him)",
+			platform, senderExternalID, e.CanonicalName, platform)
+	}
+	return e, nil
 }
 
 // messageExternalID converts a RawMessage's own ExternalID (each
@@ -115,6 +115,13 @@ func (a *API) messageExternalID(externalID string) *string {
 // the type the LOSING caller asked for is simply not applied when two
 // concurrent resolves disagree about a brand-new name's type.
 func (a *API) resolveEntity(ctx context.Context, name, entityType string) (*memory.Entity, error) {
+	// An extracted subject/object that names Marco (self name, alias, or a
+	// configured identity string such as his JID or Instagram name) is the
+	// self entity: otherwise his facts would land on a second, non-self
+	// "Marco" entity and bypass the self-only correction gate.
+	if a.identity != nil && a.self != nil && a.identity.IsSelfName(name) {
+		return a.self, nil
+	}
 	e, _, err := a.entities.GetOrCreateByCanonicalName(ctx, name, entityType)
 	if err != nil {
 		return nil, fmt.Errorf("resolve entity %q: %w", name, err)

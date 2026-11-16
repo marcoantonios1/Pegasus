@@ -25,6 +25,7 @@ import (
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 	"github.com/marcoantonios1/Pegasus/internal/service"
+	"github.com/marcoantonios1/Pegasus/internal/testdb"
 )
 
 // helperEnv switches the test binary into a stand-in for the real
@@ -47,9 +48,22 @@ func TestMain(m *testing.M) {
 			time.Sleep(time.Hour) // a shutdown that never finishes
 			return nil
 		}
-		os.Exit(realMain(nil, os.Stderr, env, hang, os.Exit))
+		os.Exit(realMain(nil, os.Stderr, selfEnv(env), hang, os.Exit))
 	}
 	os.Exit(m.Run())
+}
+
+// selfEnv adds a valid self identity to env (tests about other things).
+func selfEnv(env func(string) (string, bool)) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		switch k {
+		case "PEGASUS_SELF_NAME":
+			return "Marco", true
+		case "PEGASUS_SELF_WHATSAPP_IDS":
+			return "+961 70 000 001", true
+		}
+		return env(k)
+	}
 }
 
 func TestRealMain_ConfigErrorExits2(t *testing.T) {
@@ -79,7 +93,7 @@ func TestRealMain_RuntimeErrorExits1(t *testing.T) {
 		return "", false
 	}
 	run := func(context.Context, *service.Config) error { return errors.New("boom") }
-	if code := realMain(nil, io.Discard, env, run, func(int) {}); code != exitFail {
+	if code := realMain(nil, io.Discard, selfEnv(env), run, func(int) {}); code != exitFail {
 		t.Fatalf("exit code %d, want %d", code, exitFail)
 	}
 }
@@ -186,29 +200,13 @@ func TestForcedExitOnSecondSignal(t *testing.T) {
 // shutdown timeout. Skips without a reachable test database (same
 // convention as the other DB-backed tests; auth failures fail).
 func TestBinary_SIGTERMExitsCleanly(t *testing.T) {
-	dsn := os.Getenv("PEGASUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
-			dsn = "postgres://pegasus:" + pw + "@localhost:5432/pegasus?sslmode=disable"
-		}
-	}
-	if dsn == "" {
-		t.Skip("no test database configured — set PEGASUS_TEST_DATABASE_URL, or POSTGRES_PASSWORD (`set -a; source .env; set +a`), to enable this test")
-	}
+	// A fresh, migrated database: the service bootstraps the single self
+	// entity, which the shared dev database holds under another name.
+	dsn := testdb.Fresh(t)
 	pc, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse test DSN: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	conn, err := pgx.ConnectConfig(ctx, pc)
-	cancel()
-	if err != nil {
-		if strings.Contains(err.Error(), "password authentication failed") || strings.Contains(err.Error(), "28P01") {
-			t.Fatalf("authentication failed connecting to the test database (%v) — re-export POSTGRES_PASSWORD or fix PEGASUS_TEST_DATABASE_URL", err)
-		}
-		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
-	}
-	conn.Close(context.Background())
 	sslmode := "disable"
 	if u, err := url.Parse(dsn); err == nil && u.Query().Get("sslmode") != "" {
 		sslmode = u.Query().Get("sslmode")
@@ -232,7 +230,9 @@ func TestBinary_SIGTERMExitsCleanly(t *testing.T) {
 		"PEGASUS_DB_USER=" + pc.User,
 		"PEGASUS_DB_SSLMODE=" + sslmode,
 		"PEGASUS_HTTP_ADDR=" + addr,
-		"PEGASUS_RECOVER_ON_START=false", // never touch other tests' unprocessed rows
+		"PEGASUS_RECOVER_ON_START=false",
+		"PEGASUS_SELF_NAME=Marco",
+		"PEGASUS_SELF_WHATSAPP_IDS=+961 70 000 001",
 		"PEGASUS_COSTGUARD_URL=http://127.0.0.1:1",
 	}
 	var logs strings.Builder
@@ -314,7 +314,7 @@ func TestWhatsAppEnabledButUnpaired_Exits2(t *testing.T) {
 		return "", false
 	}
 	var stderr strings.Builder
-	code := realMain(nil, &stderr, env, runService, func(int) {})
+	code := realMain(nil, &stderr, selfEnv(env), runService, func(int) {})
 	if code != exitConfig {
 		t.Fatalf("exit %d, want %d\n%s", code, exitConfig, stderr.String())
 	}
@@ -333,7 +333,7 @@ func TestWhatsAppEnabledButUnpaired_Exits2(t *testing.T) {
 		return env(k)
 	}
 	stderr.Reset()
-	if code := realMain(nil, &stderr, inRepo, runService, func(int) {}); code != exitConfig || !strings.Contains(stderr.String(), "inside the git repository") {
+	if code := realMain(nil, &stderr, selfEnv(inRepo), runService, func(int) {}); code != exitConfig || !strings.Contains(stderr.String(), "inside the git repository") {
 		t.Errorf("in-repo session path: exit %d\n%s", code, stderr.String())
 	}
 	if _, err := os.Stat("session.db"); err == nil {

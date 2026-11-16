@@ -83,7 +83,7 @@ func TestProcessLiveMessage_SourceTypeDerivedFromClosedWindowNotTriggeringMessag
 		Triager: triager, Extractor: extractor,
 		Transcriber:  transcriber,
 		AudioFetcher: fixedAudioFetcher([]byte("audio")),
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "trigger-bug-conv-" + uuid.New().String()
 	senderExternalID := "trigger-bug-sender-" + uuid.New().String()
@@ -144,7 +144,7 @@ func TestProcessLiveMessage_MixedWindowUsesVoiceTranscriptSourceType(t *testing.
 		Triager: triager, Extractor: extractor,
 		Transcriber:  transcriber,
 		AudioFetcher: fixedAudioFetcher([]byte("audio")),
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "mixed-conv-" + uuid.New().String()
 	senderExternalID := "mixed-sender-" + uuid.New().String()
@@ -203,7 +203,7 @@ func TestImportWhatsApp_MixedTextAndVoiceWindow_UsesVoiceTranscriptSourceType(t 
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor, Transcriber: transcriber,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
@@ -283,7 +283,7 @@ func TestProcessLiveMessage_VoiceWindowTranscribedThenExtracted(t *testing.T) {
 		Triager: triager, Extractor: extractor,
 		Transcriber:  transcriber,
 		AudioFetcher: fixedAudioFetcher([]byte("fake audio bytes")),
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "voice-conv-" + uuid.New().String()
 	senderExternalID := "voice-sender-" + uuid.New().String()
@@ -379,7 +379,7 @@ func TestProcessLiveMessage_VoiceTranscriptionFailure_MessageStaysUnprocessed(t 
 		Triager: triager, Extractor: extractor,
 		Transcriber:  transcriber,
 		AudioFetcher: fixedAudioFetcher([]byte("corrupt audio")),
-	})
+	}).withTestSelf(t)
 
 	mediaRef := "corrupt-note.opus"
 	raw := ingestion.RawMessage{
@@ -447,7 +447,7 @@ func TestImportWhatsApp_VoiceMessagesTranscribedAndWindowed(t *testing.T) {
 		// Deliberately no AudioFetcher here — ImportWhatsApp must build its
 		// own, scoped to exportPath's directory, not rely on one supplied
 		// via PipelineDeps (which live-path ProcessLiveMessage uses instead).
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own
@@ -515,7 +515,7 @@ func TestImportWhatsApp_VoiceTranscriptionFailure_ContinuesRestOfImport(t *testi
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor, Transcriber: transcriber,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name — see write_pipeline_test.go's own

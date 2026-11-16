@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/identity"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
@@ -109,8 +110,10 @@ type API struct {
 	triager          Triager
 	extractor        Extractor
 	activityRecorder ActivityRecorder
-	selfExternalIDs  map[string]bool
-	logger           func(format string, args ...any)
+	// identity/self are set once by BootstrapSelf and read-only after.
+	identity *identity.Registry
+	self     *memory.Entity
+	logger   func(format string, args ...any)
 
 	transcriber         Transcriber
 	audioFetcher        AudioFetcher
@@ -190,12 +193,9 @@ type PipelineDeps struct {
 	Extractor        Extractor
 	ActivityRecorder ActivityRecorder
 
-	// SelfExternalIDs are the platform sender IDs (e.g. WhatsApp JIDs)
-	// that identify Marco's own outgoing messages — RawMessage carries no
-	// separate "is this me" flag (see resolveSender's doc comment for
-	// why), so the pipeline has to be told explicitly which external IDs
-	// are Marco rather than inferring it from content.
-	SelfExternalIDs []string
+	// Marco's identities are NOT pipeline deps: they are registered, and
+	// tied to the single is_self entity, by BootstrapSelf (bootstrap_self.go),
+	// which must run before any message is ingested.
 
 	// Logger receives one line of progress per completed window during
 	// ImportWhatsApp — the minimum progress-tracking bar its own doc
@@ -276,11 +276,6 @@ func (a *API) WithPipeline(deps PipelineDeps) *API {
 	a.honorCorrectionsOnImport = deps.HonorCorrectionsOnImport
 	a.liveWindowFlushAfter = deps.LiveWindowFlushAfter
 	a.liveWindowFlushPollInterval = deps.LiveWindowFlushPollInterval
-
-	a.selfExternalIDs = make(map[string]bool, len(deps.SelfExternalIDs))
-	for _, id := range deps.SelfExternalIDs {
-		a.selfExternalIDs[id] = true
-	}
 
 	return a
 }

@@ -291,7 +291,7 @@ func TestBackfillEmbeddings_FailureIsLoggedAndRunContinues(t *testing.T) {
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	result, err := a.BackfillEmbeddings(ctx, []uuid.UUID{failMsg.ID, okMsg.ID})
 	if err != nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/identity"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
+	"github.com/marcoantonios1/Pegasus/internal/testdb"
 )
 
 // testConfig builds a Config pointing at the test database, following
@@ -28,34 +29,18 @@ import (
 // suite. The database must already be migrated (`docker compose up -d
 // postgres migrate`); these tests never alter the schema.
 //
-// Every config uses RecoverOnStart=false: the dev database holds other
-// tests' unprocessed rows, which this suite must not touch.
+// Every config uses RecoverOnStart=false so recovery only runs where a
+// test asks for it.
 func testConfig(t *testing.T) *Config {
 	t.Helper()
-	dsn := os.Getenv("PEGASUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
-			dsn = "postgres://pegasus:" + pw + "@localhost:5432/pegasus?sslmode=disable"
-		}
-	}
-	if dsn == "" {
-		t.Skip("no test database configured — set PEGASUS_TEST_DATABASE_URL, or POSTGRES_PASSWORD (`set -a; source .env; set +a`), to enable this test")
-	}
-
+	// A fresh, migrated database per test: the bootstrap binds the single
+	// is_self entity, which the shared dev database already holds under an
+	// arbitrary name.
+	dsn := testdb.Fresh(t)
 	pc, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse test DSN: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, pc)
-	if err != nil {
-		if isAuthFailure(err) {
-			t.Fatalf("authentication failed connecting to the test database (%v) — the Postgres password was likely rotated; set PEGASUS_TEST_DATABASE_URL to the current DSN, or re-export POSTGRES_PASSWORD (`set -a; source .env; set +a`) before running go test", err)
-		}
-		t.Skipf("no test database available (%v) — run `docker compose up -d postgres migrate` to enable this test", err)
-	}
-	conn.Close(ctx)
 
 	sslmode := "disable"
 	if u, err := url.Parse(dsn); err == nil && u.Query().Get("sslmode") != "" {
@@ -74,10 +59,34 @@ func testConfig(t *testing.T) *Config {
 		TranscriptionConfidenceThreshold: -0.7, TranscriptionOpenAIProviderHint: "openai_primary",
 
 		LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: time.Hour,
-		RecoverOnStart:  false,
+		RecoverOnStart: false,
+
+		SelfName:     testSelfName,
+		SelfWhatsApp: []string{testSelfWhatsApp},
+		Identity:     testRegistry(t, testSelfWhatsApp),
+
 		HTTPAddr:        "127.0.0.1:0",
 		ShutdownTimeout: 45 * time.Second,
 	}
+}
+
+const (
+	testSelfName     = "Marco"
+	testSelfWhatsApp = "96170000001@s.whatsapp.net"
+)
+
+// testRegistry is the test self identity: "Marco" with alias "Marco
+// Antonios", whatsappIDs on WhatsApp and "Marco Antonios IG" on Instagram.
+func testRegistry(t *testing.T, whatsappIDs ...string) *identity.Registry {
+	t.Helper()
+	reg, problems := identity.New(identity.Config{
+		SelfName: testSelfName, Aliases: []string{"Marco Antonios"},
+		WhatsApp: whatsappIDs, Instagram: []string{"Marco Antonios IG"},
+	})
+	if len(problems) > 0 {
+		t.Fatalf("test identity: %v", problems)
+	}
+	return reg
 }
 
 func isAuthFailure(err error) bool {
