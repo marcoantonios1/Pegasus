@@ -90,13 +90,7 @@ func OpenStore(ctx context.Context, path string, log waLog.Logger) (*sqlstore.Co
 	if err := prepareSessionFile(path); err != nil {
 		return nil, err
 	}
-	q := url.Values{}
-	q.Add("_pragma", "foreign_keys(1)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "busy_timeout(5000)")
-	dsn := "file:" + path + "?" + q.Encode()
-
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", sessionDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open session store: %w", err)
 	}
@@ -106,6 +100,15 @@ func OpenStore(ctx context.Context, path string, log waLog.Logger) (*sqlstore.Co
 		return nil, fmt.Errorf("upgrade session store schema: %w", err)
 	}
 	return container, nil
+}
+
+// sessionDSN applies the pragmas on every connection the pool opens.
+func sessionDSN(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	return "file:" + path + "?" + q.Encode()
 }
 
 // pairedDevice returns the store's first device, or ErrNotPaired if it has
