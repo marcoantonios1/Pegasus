@@ -58,5 +58,43 @@ services:
       - ./backups:/backups
     entrypoint: ["/bin/sh", "/backup.sh"]
 
+  # The Pegasus service (cmd/pegasus). Settings come from .env (env_file,
+  # the same .env the other services read POSTGRES_PASSWORD from — no
+  # secret appears in this file); only non-secret container-specific
+  # overrides live under `environment`. See README.md "Configuration".
+  pegasus:
+    build: .
+    container_name: pegasus
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      PEGASUS_DB_HOST: postgres
+      PEGASUS_DB_PORT: "5432"
+      # Listen on all interfaces INSIDE the container; the host-side
+      # publish below is loopback-only.
+      PEGASUS_HTTP_ADDR: 0.0.0.0:8095
+      # Costguard runs on the host, reached via host-gateway (extra_hosts).
+      # Overridable from .env.
+      PEGASUS_COSTGUARD_URL: ${PEGASUS_COSTGUARD_URL:-http://host.docker.internal:8080}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8095:8095"
+    # Must exceed PEGASUS_SHUTDOWN_TIMEOUT (default 60s). Docker's default
+    # of 10s would SIGKILL the process in the middle of its final flush.
+    stop_grace_period: 90s
+    healthcheck:
+      test: ["CMD", "/pegasus", "healthcheck"]
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
 volumes:
   postgres_data:

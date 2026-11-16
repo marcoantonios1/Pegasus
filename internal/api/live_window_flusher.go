@@ -54,6 +54,12 @@ const (
 	shutdownFlushTimeout = 30 * time.Second
 )
 
+// ShutdownFlushTimeout exposes shutdownFlushTimeout to the service
+// entrypoint (internal/service), whose overall shutdown budget must be
+// comfortably larger than this so the final flush is never cut short by
+// the process's own deadline.
+const ShutdownFlushTimeout = shutdownFlushTimeout
+
 // pendingFlush is one window FlushIdleWindows/StartLiveWindowFlusher's
 // shutdown path has decided to close, carrying everything
 // processCompletedWindow needs — the shared shape collectWindowsToFlush
@@ -199,14 +205,27 @@ func (a *API) FlushIdleWindows(ctx context.Context) error {
 // Does not block: the polling loop (and the final shutdown flush) run in
 // a spawned goroutine; this function returns immediately after starting
 // it.
-func (a *API) StartLiveWindowFlusher(ctx context.Context) {
+//
+// The returned channel is closed only AFTER that goroutine has exited,
+// i.e. after the final shutdown flush has completed (successfully,
+// with logged errors, or by hitting shutdownFlushTimeout). A caller
+// that owns the database pool (internal/service) must wait on it before
+// closing the pool — closing first would race the flush's own writes.
+// Callers that don't care (tests, fire-and-forget use) can ignore the
+// return value. Pass a context dedicated to the flusher and cancel it
+// explicitly at the right point of shutdown, not the process's signal
+// context: cancelling is what triggers the final flush, so it must
+// happen only after intake has stopped.
+func (a *API) StartLiveWindowFlusher(ctx context.Context) <-chan struct{} {
 	pollInterval := a.liveWindowFlushPollInterval
 	if pollInterval <= 0 {
 		pollInterval = DefaultLiveWindowFlushPollInterval
 	}
 
+	done := make(chan struct{})
 	ticker := time.NewTicker(pollInterval)
 	go func() {
+		defer close(done)
 		defer ticker.Stop()
 		for {
 			select {
@@ -220,6 +239,7 @@ func (a *API) StartLiveWindowFlusher(ctx context.Context) {
 			}
 		}
 	}()
+	return done
 }
 
 // flushAllWindowsOnShutdown is StartLiveWindowFlusher's ctx-cancellation
@@ -237,6 +257,10 @@ func (a *API) flushAllWindowsOnShutdown() {
 	defer cancel()
 
 	if err := a.processFlushedWindows(shutdownCtx, toProcess); err != nil {
-		a.logf("StartLiveWindowFlusher: shutdown flush: %v", err)
+		// Any window that failed here (including by running out of
+		// shutdownFlushTimeout) still has every message stored with
+		// processed=false, so the next start's recovery sweep
+		// (SnapshotUnprocessedLive/ProcessRecoveredMessages) picks it up.
+		a.logf("StartLiveWindowFlusher: shutdown flush: %v — affected messages remain processed=false and will be picked up by recovery on next start", err)
 	}
 }

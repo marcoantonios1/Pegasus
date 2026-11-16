@@ -14,24 +14,20 @@ import (
 // after normalization; routing, classification, and storage are the Message
 // Router's job, not the adapter's.
 //
-// TODO(live-window-idle-flush): no production entrypoint currently
-// constructs a real whatsmeow client, wires its event stream through
-// this handler into a Sink that calls api.API.ProcessLiveMessage, AND
-// keeps that *api.API running — confirmed by reading (ProcessLiveMessage
-// has no production caller anywhere in this codebase today, only test
-// callers). Whenever that entrypoint is built, it MUST also call
-// api.API.StartLiveWindowFlusher(ctx) once, and — before starting this
-// handler's event stream — api.API.SnapshotUnprocessedLive(ctx) followed
-// by a backgrounded api.API.ProcessRecoveredMessages(ctx, snapshot) (see
-// each one's own doc comment for why the snapshot must be taken before
-// live events start flowing). Without the flusher running, a live
-// window only ever closes when the SAME conversation's next message
-// happens to break its time/count bound — see extraction.LiveWindower's
-// own doc comment — so a chat's trailing messages would otherwise sit
-// unextracted in memory indefinitely. Deliberately not invented here:
-// this issue's own instructions are explicit that a missing production
-// entrypoint is not a reason to build a server main just to have
-// somewhere to put this wiring.
+// TODO(whatsmeow-live-source): the production entrypoint now exists
+// (cmd/pegasus -> internal/service.Run), and it already does the
+// sequencing this handler depends on: SnapshotUnprocessedLive before any
+// intake, StartLiveWindowFlusher, background ProcessRecoveredMessages,
+// and an ordered shutdown that stops intake before the final window
+// flush. What is still missing is a real whatsmeow client. To add it,
+// implement internal/service.LiveSource (Name/Start/Stop): in Start,
+// connect the client and register NewEventHandler(sink).Handle with
+// client.AddEventHandler, using the sink Run passes in (it calls
+// api.API.ProcessLiveMessage and tracks in-flight calls for shutdown).
+// In Stop, disconnect. Then append it to service.Options.Sources in
+// cmd/pegasus/main.go. That issue also owns the live AudioFetcher (voice
+// download via whatsmeow) and the session store (sqlite needs CGO; the
+// Dockerfile currently builds with CGO_ENABLED=0).
 type EventHandler struct {
 	Sink ingestion.Sink
 
