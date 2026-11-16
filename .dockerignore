@@ -1,0 +1,16 @@
+# Keep secrets, real data and local clutter out of the build context.
+.env
+.env.*
+!.env.example
+.git
+.github
+.claude
+backups
+data
+tmp
+bin
+*.dump
+*.sql.gz
+*.log
+*.test
+.DS_Store

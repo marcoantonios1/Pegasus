@@ -74,9 +74,9 @@ func testConfig(t *testing.T) *Config {
 		TranscriptionConfidenceThreshold: -0.7, TranscriptionOpenAIProviderHint: "openai_primary",
 
 		LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: time.Hour,
-		RecoverOnStart:       false,
-		HTTPAddr:             "127.0.0.1:0",
-		ShutdownTimeout:      45 * time.Second,
+		RecoverOnStart:  false,
+		HTTPAddr:        "127.0.0.1:0",
+		ShutdownTimeout: 45 * time.Second,
 	}
 }
 

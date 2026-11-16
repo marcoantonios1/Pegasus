@@ -68,7 +68,9 @@ const (
 // with processed=false and is picked up by the next start's recovery.
 var ErrShutdownIncomplete = errors.New("graceful shutdown did not complete within PEGASUS_SHUTDOWN_TIMEOUT")
 
-const httpShutdownBudget = 5 * time.Second
+// httpShutdownBudget is short: health requests are tiny, and Shutdown otherwise
+// waits on freshly-opened idle keep-alive connections. After it, Close.
+const httpShutdownBudget = 2 * time.Second
 
 // Run starts the service and blocks until ctx is cancelled (SIGINT/SIGTERM
 // in production), then shuts down in order and returns. It returns nil on
@@ -212,6 +214,8 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 	// live message can never be both in the snapshot and in a live window.
 	var snapshot []*memory.Message
 	if cfg.RecoverOnStart {
+		// One indexed query; generously bounded so a wedged DB fails startup
+		// instead of hanging it.
 		snapCtx, cancelSnap := context.WithTimeout(ctx, cfg.DBConnectTimeout*4)
 		snapshot, err = a.SnapshotUnprocessedLive(snapCtx)
 		cancelSnap()
