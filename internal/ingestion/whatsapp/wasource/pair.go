@@ -12,7 +12,6 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp"
 )
@@ -115,7 +114,7 @@ func Pair(ctx context.Context, cfg Config, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	wlog := waLog.Stdout("whatsmeow", cfg.LogLevel, false)
+	wlog := newWhatsmeowLogger(cfg.LogLevel)
 	container, err := OpenStore(ctx, path, wlog.Sub("Database"))
 	if err != nil {
 		return err

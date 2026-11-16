@@ -18,6 +18,7 @@ type FakeClient struct {
 	connects      int
 	disconnects   int
 	autoReconnect bool
+	cleared       int
 
 	// LIDs maps @lid JIDs to phone-number JIDs (PNForLID).
 	LIDs map[types.JID]types.JID
@@ -98,6 +99,21 @@ func (f *FakeClient) Emit(evt any) {
 	for _, h := range hs {
 		h(evt)
 	}
+}
+
+func (f *FakeClient) ClearSession(context.Context) error {
+	f.mu.Lock()
+	f.cleared++
+	f.mu.Unlock()
+	f.rec("clear_session")
+	return nil
+}
+
+// ClearedCount reports how many times ClearSession was called.
+func (f *FakeClient) ClearedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cleared
 }
 
 func (f *FakeClient) ConnectCount() int {

@@ -32,6 +32,7 @@ const (
 type Stats struct {
 	mu          sync.Mutex
 	forwarded   int64
+	duplicates  int64
 	sinkFailed  int64
 	sinkRetries int64
 	lidUnmapped int64
@@ -66,7 +67,8 @@ func (s *Stats) add(field *int64) {
 
 // StatsSnapshot is a point-in-time copy of Stats, safe to serialize.
 type StatsSnapshot struct {
-	Forwarded   int64            `json:"forwarded"`
+	Forwarded   int64            `json:"forwarded"`  // newly stored
+	Duplicates  int64            `json:"duplicates"` // redeliveries of an already-stored message
 	SinkFailed  int64            `json:"sink_failed"`
 	SinkRetries int64            `json:"sink_retries"`
 	LIDUnmapped int64            `json:"lid_unmapped"`
@@ -78,7 +80,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap := StatsSnapshot{
-		Forwarded: s.forwarded, SinkFailed: s.sinkFailed, SinkRetries: s.sinkRetries, LIDUnmapped: s.lidUnmapped,
+		Forwarded: s.forwarded, Duplicates: s.duplicates, SinkFailed: s.sinkFailed, SinkRetries: s.sinkRetries, LIDUnmapped: s.lidUnmapped,
 		Dropped: make(map[string]int64, len(s.drops)), OtherEvents: make(map[string]int64, len(s.otherEvents)),
 	}
 	for k, v := range s.drops {
@@ -94,6 +96,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 func (s StatsSnapshot) String() string {
 	parts := []string{
 		"forwarded=" + itoa(s.Forwarded),
+		"duplicates=" + itoa(s.Duplicates),
 		"sink_failed=" + itoa(s.SinkFailed),
 		"sink_retries=" + itoa(s.SinkRetries),
 		"lid_unmapped=" + itoa(s.LIDUnmapped),

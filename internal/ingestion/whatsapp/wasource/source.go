@@ -14,7 +14,6 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp"
@@ -144,7 +143,7 @@ func Open(ctx context.Context, cfg Config) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	wlog := waLog.Stdout("whatsmeow", cfg.LogLevel, false)
+	wlog := newWhatsmeowLogger(cfg.LogLevel)
 	container, err := OpenStore(ctx, path, wlog.Sub("Database"))
 	if err != nil {
 		return nil, err
@@ -159,7 +158,7 @@ func Open(ctx context.Context, cfg Config) (*Source, error) {
 	}
 	cli := whatsmeow.NewClient(dev, wlog.Sub("Client"))
 	cli.EnableAutoReconnect = true
-	s := NewWithClient(whatsmeowClient{cli}, cfg)
+	s := NewWithClient(whatsmeowClient{c: cli, container: container, jid: *dev.ID}, cfg)
 	s.store = container
 	return s, nil
 }
@@ -308,7 +307,8 @@ func (s *Source) onEvent(evt any) {
 	case *events.Disconnected:
 		s.markDisconnected()
 	case *events.LoggedOut:
-		s.fail("logged_out", fmt.Sprintf("the linked device was logged out or revoked (%v); whatsmeow has already removed it from the session store. Re-pair: %s", e.Reason, PairCommandHint))
+		s.clearSession()
+		s.fail("logged_out", fmt.Sprintf("the linked device was logged out or revoked (%v); the dead device has been removed from the session store. Re-pair: %s", e.Reason, PairCommandHint))
 	case *events.StreamReplaced:
 		s.fail("stream_replaced", "another client connected with this same session (two processes share one session file, e.g. a `pair` run while the service was up). Stop the other process, then restart the service")
 	case *events.ClientOutdated:
@@ -316,6 +316,9 @@ func (s *Source) onEvent(evt any) {
 	case *events.TemporaryBan:
 		s.fail("temporary_ban", fmt.Sprintf("the account is temporarily banned (%v). Wait for it to expire, then restart the service", e.Code))
 	case *events.ConnectFailure:
+		if e.Reason.IsLoggedOut() {
+			s.clearSession()
+		}
 		if isFatalConnectFailure(e.Reason) {
 			s.fail("connect_failure", fmt.Sprintf("WhatsApp refused the connection (%v). Re-pair if this persists: %s", e.Reason, PairCommandHint))
 		} else {
@@ -391,6 +394,10 @@ func (s *Source) deliver(raw ingestion.RawMessage) error {
 		last = s.sink(raw)
 		if last == nil {
 			s.stats.add(&s.stats.forwarded)
+			return nil
+		}
+		if errors.Is(last, ingestion.ErrDuplicate) {
+			s.stats.add(&s.stats.duplicates)
 			return nil
 		}
 		if errors.Is(last, ingestion.ErrSinkClosed) || attempt == attempts {
@@ -481,6 +488,20 @@ func (s *Source) fail(state, action string) {
 	s.mu.Unlock()
 	s.client.DisableAutoReconnect()
 	s.logf("whatsapp: ERROR: fatal state %q: %s. Live intake has stopped; the service stays up (open windows still flush, recovery completes) but /readyz reports not ready until this is fixed and the service restarted.", state, action)
+}
+
+// clearSession removes the logged-out device from the session store, so a
+// later `pair` starts fresh instead of reporting a dead session as paired.
+// whatsmeow usually does this itself, but not reliably (observed: a 401
+// logout that left the device row behind).
+func (s *Source) clearSession() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.client.ClearSession(ctx); err != nil {
+		s.logf("whatsapp: could not remove the logged-out device from the session store (%v); delete the session file before pairing again", err)
+		return
+	}
+	s.logf("whatsapp: removed the logged-out device from the session store")
 }
 
 func (s *Source) needsReconnect() bool {

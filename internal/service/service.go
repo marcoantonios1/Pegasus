@@ -24,6 +24,7 @@ import (
 	"github.com/marcoantonios1/Pegasus/db"
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/ingestion"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
@@ -350,7 +351,13 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 
 	// --- Intake sources ---
 	workCtx, cancelWork := context.WithCancel(context.Background())
-	in := &intake{workCtx: workCtx, timeout: cfg.LiveSinkTimeout, process: a.ProcessLiveMessage}
+	in := &intake{workCtx: workCtx, timeout: cfg.LiveSinkTimeout, process: func(ctx context.Context, m ingestion.RawMessage) error {
+		res, err := a.ProcessLiveMessageResult(ctx, m)
+		if err == nil && res.Duplicate {
+			return ingestion.ErrDuplicate
+		}
+		return err
+	}}
 	sd.intake, sd.cancelWork = in, cancelWork
 	if len(sources) == 0 {
 		logf("pegasus: no live sources configured")

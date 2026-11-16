@@ -38,3 +38,8 @@ type Sink func(RawMessage) error
 // (the service is shutting down). It is permanent: a source must not
 // retry it.
 var ErrSinkClosed = errors.New("ingestion: sink is closed (service shutting down)")
+
+// ErrDuplicate is returned by a Sink when the message was already ingested
+// (same external ID), so nothing new was stored. It is not a failure: a
+// source counts it and must not retry.
+var ErrDuplicate = errors.New("ingestion: message already ingested")

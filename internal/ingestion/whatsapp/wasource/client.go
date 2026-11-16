@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -23,10 +24,17 @@ type Client interface {
 	// DisableAutoReconnect stops whatsmeow's own reconnect loop (used once a
 	// fatal state is reached, so nothing keeps hammering the server).
 	DisableAutoReconnect()
+	// ClearSession deletes the paired device from the session store (after
+	// a logout). Idempotent.
+	ClearSession(ctx context.Context) error
 }
 
 // whatsmeowClient adapts *whatsmeow.Client to Client.
-type whatsmeowClient struct{ c *whatsmeow.Client }
+type whatsmeowClient struct {
+	c         *whatsmeow.Client
+	container *sqlstore.Container
+	jid       types.JID // the paired device, captured before whatsmeow can clear Store.ID
+}
 
 func (w whatsmeowClient) AddEventHandler(h func(evt any)) uint32 {
 	return w.c.AddEventHandler(whatsmeow.EventHandler(h))
@@ -45,4 +53,15 @@ func (w whatsmeowClient) PNForLID(ctx context.Context, lid types.JID) (types.JID
 }
 func (w whatsmeowClient) DisableAutoReconnect() {
 	w.c.EnableAutoReconnect = false
+}
+
+// ClearSession loads a fresh copy of the device row rather than touching
+// w.c.Store, which whatsmeow may be deleting concurrently on its own
+// goroutine after a logout. Deleting an already-deleted row is a no-op.
+func (w whatsmeowClient) ClearSession(ctx context.Context) error {
+	dev, err := w.container.GetDevice(ctx, w.jid)
+	if err != nil || dev == nil {
+		return err
+	}
+	return dev.Delete(ctx)
 }
