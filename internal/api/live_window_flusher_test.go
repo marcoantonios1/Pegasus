@@ -698,3 +698,78 @@ func TestFlushIdleWindows_NeverCallsRecordActivity(t *testing.T) {
 		t.Errorf("expected FlushIdleWindows to never call RecordActivity, but count changed from %d to %d", callsBeforeFlush, recorder.calls)
 	}
 }
+
+// flushGateExtractor blocks every ExtractWindow call until release is
+// closed, signalling entered first — lets a test hold the final shutdown
+// flush mid-extraction and observe what the flusher's done channel does
+// meanwhile.
+type flushGateExtractor struct {
+	entered chan struct{}
+	release chan struct{}
+	triples []extraction.ExtractedTriple
+}
+
+func (f *flushGateExtractor) ExtractWindow(ctx context.Context, w extraction.Window) ([]extraction.ExtractedTriple, error) {
+	f.entered <- struct{}{}
+	<-f.release
+	return f.triples, nil
+}
+
+// TestStartLiveWindowFlusher_DoneClosesOnlyAfterFinalFlush proves the
+// channel StartLiveWindowFlusher returns stays open while the final
+// shutdown flush is still extracting, and closes only once that flush
+// (including MarkProcessed) has completed — the guarantee the service
+// relies on before closing the pool.
+func TestStartLiveWindowFlusher_DoneClosesOnlyAfterFinalFlush(t *testing.T) {
+	ts := newTestStores(t)
+	ctx := context.Background()
+
+	extractor := &flushGateExtractor{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+		triples: []extraction.ExtractedTriple{{Subject: "Done Channel Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8}},
+	}
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
+		WithPipeline(PipelineDeps{
+			Triager: &fakeTriager{candidate: true}, Extractor: extractor,
+			LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: 10 * time.Millisecond,
+		})
+
+	convExternal := "done-chan-conv-" + uuid.New().String()
+	externalID := sendLiveMessage(t, ctx, a, convExternal, "done-chan-sender-"+uuid.New().String(), time.Now())
+
+	flusherCtx, cancel := context.WithCancel(context.Background())
+	done := a.StartLiveWindowFlusher(flusherCtx)
+
+	select {
+	case <-done:
+		t.Fatal("done closed before the flusher was even cancelled")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-extractor.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the final shutdown flush to start extracting")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("done closed while the final shutdown flush was still extracting")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if messageProcessed(t, ctx, ts, externalID) {
+		t.Fatal("message marked processed before extraction was released")
+	}
+
+	close(extractor.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("done never closed after the final flush was released")
+	}
+	if !messageProcessed(t, ctx, ts, externalID) {
+		t.Error("expected the message processed=true by the time done closed")
+	}
+}
