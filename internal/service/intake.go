@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"sync"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
@@ -31,7 +30,9 @@ type LiveSource interface {
 
 // ErrIntakeClosed is returned by a source's sink once that source has
 // been stopped (or the service is shutting down).
-var ErrIntakeClosed = errors.New("pegasus: live intake is closed (service shutting down)")
+// It is ingestion.ErrSinkClosed, so sources can recognize it without
+// importing this package.
+var ErrIntakeClosed = ingestion.ErrSinkClosed
 
 // intake tracks every in-flight sink call across all sources, so shutdown
 // can wait for them to drain before the final window flush. Each call

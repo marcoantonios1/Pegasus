@@ -5,6 +5,8 @@
 // Router's job (see Pegasus proposal, architecture diagram).
 package ingestion
 
+import "errors"
+
 import "time"
 
 const (
@@ -31,3 +33,8 @@ type RawMessage struct {
 // it and do nothing else with the result — routing, classification, and
 // storage happen downstream, not in the adapter.
 type Sink func(RawMessage) error
+
+// ErrSinkClosed is returned by a Sink that no longer accepts messages
+// (the service is shutting down). It is permanent: a source must not
+// retry it.
+var ErrSinkClosed = errors.New("ingestion: sink is closed (service shutting down)")

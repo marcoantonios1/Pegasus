@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
@@ -14,20 +15,9 @@ import (
 // after normalization; routing, classification, and storage are the Message
 // Router's job, not the adapter's.
 //
-// TODO(whatsmeow-live-source): the production entrypoint now exists
-// (cmd/pegasus -> internal/service.Run), and it already does the
-// sequencing this handler depends on: SnapshotUnprocessedLive before any
-// intake, StartLiveWindowFlusher, background ProcessRecoveredMessages,
-// and an ordered shutdown that stops intake before the final window
-// flush. What is still missing is a real whatsmeow client. To add it,
-// implement internal/service.LiveSource (Name/Start/Stop): in Start,
-// connect the client and register NewEventHandler(sink).Handle with
-// client.AddEventHandler, using the sink Run passes in (it calls
-// api.API.ProcessLiveMessage and tracks in-flight calls for shutdown).
-// In Stop, disconnect. Then append it to service.Options.Sources in
-// cmd/pegasus/main.go. That issue also owns the live AudioFetcher (voice
-// download via whatsmeow) and the session store (sqlite needs CGO; the
-// Dockerfile currently builds with CGO_ENABLED=0).
+// It does no identity canonicalization or filtering of its own: the live
+// source (internal/ingestion/whatsapp/wasource) canonicalizes JIDs and
+// drops unsupported chats/types before events reach it.
 type EventHandler struct {
 	Sink ingestion.Sink
 
@@ -58,7 +48,7 @@ func (h *EventHandler) Handle(evt any) {
 func (h *EventHandler) HandleMessage(evt *events.Message) {
 	raw, ok := normalizeMessage(evt)
 	if !ok {
-		h.logf("whatsapp: dropping unsupported message type, id=%s chat=%s", evt.Info.ID, evt.Info.Chat)
+		h.logf("whatsapp: dropping unsupported message type, id=%s chat=%s", evt.Info.ID, RedactJID(evt.Info.Chat))
 		return
 	}
 
@@ -125,6 +115,33 @@ func classify(m *waE2E.Message) (mediaType string, text, mediaURL *string, ok bo
 	default:
 		return "", nil, nil, false
 	}
+}
+
+// MediaTypeOf reports the Pegasus media type the adapter would assign to m,
+// or ok=false for content it drops (reactions, protocol/revoke messages,
+// stickers, ...). It is the same classification HandleMessage uses, exposed
+// so the live source can count drops by reason before forwarding.
+func MediaTypeOf(m *waE2E.Message) (mediaType string, ok bool) {
+	mediaType, _, _, ok = classify(m)
+	return mediaType, ok
+}
+
+// RedactJID shortens a JID for logs: the user part (a phone number or LID)
+// is reduced to its last 4 characters, e.g. "…4567@s.whatsapp.net". Never
+// log a full JID.
+func RedactJID(j types.JID) string {
+	if j.IsEmpty() {
+		return "(none)"
+	}
+	return RedactUser(j.User) + "@" + j.Server
+}
+
+// RedactUser keeps only the last 4 characters of a JID user part.
+func RedactUser(user string) string {
+	if len(user) <= 4 {
+		return "…" + user
+	}
+	return "…" + user[len(user)-4:]
 }
 
 func strPtr(s string) *string { return &s }
