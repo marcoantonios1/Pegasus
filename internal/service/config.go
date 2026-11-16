@@ -201,14 +201,14 @@ var settings = []setting{
 		}},
 
 	{Env: "PEGASUS_LIVE_SINK_TIMEOUT", Default: DefaultLiveSinkTimeout.String(),
-		Desc: "Per-message bound on api.ProcessLiveMessage when a live source delivers a message (it may run a window's triage+extraction+embedding inline). A message that times out after being stored stays processed=false and is recovered on next start.",
+		Desc:  "Per-message bound on api.ProcessLiveMessage when a live source delivers a message (it may run a window's triage+extraction+embedding inline). A message that times out after being stored stays processed=false and is recovered on next start.",
 		apply: func(c *Config, v string) (err error) { c.LiveSinkTimeout, err = parsePositiveDuration(v); return }},
 
 	{Env: "PEGASUS_WHATSAPP_ENABLED", Default: "false",
-		Desc: "Run the live WhatsApp source (whatsmeow). Requires a paired session: with no paired device the service exits 2 telling you to run `docker compose run --rm pegasus pair`.",
+		Desc:  "Run the live WhatsApp source (whatsmeow). Requires a paired session: with no paired device the service exits 2 telling you to run `docker compose run --rm pegasus pair`.",
 		apply: func(c *Config, v string) (err error) { c.WhatsAppEnabled, err = strconv.ParseBool(v); return }},
 	{Env: "PEGASUS_WHATSAPP_SESSION_PATH", Default: DefaultWhatsAppSessionPath,
-		Desc: "whatsmeow session database (SQLite). A credential: must resolve outside the git repo; created 0600 in a 0700 directory. docker-compose.yml uses /var/lib/pegasus/whatsmeow/session.db on the whatsmeow_session volume.",
+		Desc:  "whatsmeow session database (SQLite). A credential: must resolve outside the git repo; created 0600 in a 0700 directory. docker-compose.yml uses /var/lib/pegasus/whatsmeow/session.db on the whatsmeow_session volume.",
 		apply: func(c *Config, v string) error { c.WhatsAppSessionPath = v; return requireNonEmpty(v) }},
 	{Env: "PEGASUS_WHATSAPP_RECONNECT_BACKOFF_BASE", Default: "2s",
 		Desc: "First wait between supervised reconnect attempts (after whatsmeow's own auto-reconnect has had 30s); doubles per attempt, ±20% jitter.",
@@ -439,7 +439,7 @@ func (c *Config) displayValues() map[string]string {
 		"PEGASUS_TRANSCRIPTION_CONFIDENCE_THRESHOLD": strconv.FormatFloat(c.TranscriptionConfidenceThreshold, 'g', -1, 64),
 		"PEGASUS_TRANSCRIPTION_OPENAI_PROVIDER_HINT": c.TranscriptionOpenAIProviderHint,
 
-		"PEGASUS_SELF_EXTERNAL_IDS": strings.Join(c.SelfExternalIDs, ","),
+		"PEGASUS_SELF_EXTERNAL_IDS": strings.Join(redactIDs(c.SelfExternalIDs), ","),
 
 		"PEGASUS_LIVE_WINDOW_FLUSH_AFTER":         c.LiveWindowFlushAfter.String(),
 		"PEGASUS_LIVE_WINDOW_FLUSH_POLL_INTERVAL": c.LiveWindowFlushPollInterval.String(),

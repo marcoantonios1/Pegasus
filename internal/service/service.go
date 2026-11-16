@@ -9,10 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,6 +24,8 @@ import (
 	"github.com/marcoantonios1/Pegasus/db"
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp"
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
 )
 
@@ -30,8 +34,13 @@ import (
 // The zero value is the production configuration (no sources yet).
 type Options struct {
 	// Sources are started after the recovery snapshot and stopped first on
-	// shutdown. Empty until the Whatsmeow source exists.
+	// shutdown. Run adds the WhatsApp source itself when
+	// PEGASUS_WHATSAPP_ENABLED is true; tests pass fakes here.
 	Sources []LiveSource
+
+	// RecoveryFilter, if set, restricts the startup recovery snapshot
+	// (tests only: the shared dev database holds other tests' rows).
+	RecoveryFilter func(*memory.Message) bool
 
 	// Triager/Extractor replace the Costguard-backed ones (tests only).
 	Triager   api.Triager
@@ -54,6 +63,7 @@ type Options struct {
 
 // Lifecycle events passed to Options.OnEvent.
 const (
+	EventSnapshotTaken   = "snapshot_taken"
 	EventReady           = "ready"
 	EventHTTPStopped     = "http_stopped"
 	EventSourceStopped   = "source_stopped:" // + source name
@@ -61,6 +71,18 @@ const (
 	EventRecoveryStopped = "recovery_stopped"
 	EventFlushDone       = "flush_done"
 	EventPoolClosed      = "pool_closed"
+)
+
+// Optional interfaces a LiveSource may implement.
+type (
+	// selfIdentifier contributes the account's own external IDs, merged
+	// into the pipeline's SelfExternalIDs (WhatsApp: the paired JID).
+	selfIdentifier interface{ SelfExternalIDs() []string }
+	// healthReporter feeds /readyz. ready=false makes the service unready
+	// (fatal source states only); info is informational JSON.
+	healthReporter interface {
+		Health() (ready bool, reason string, info any)
+	}
 )
 
 // ErrShutdownIncomplete means at least one shutdown step ran out of its
@@ -91,10 +113,43 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 	for _, line := range cfg.Redacted() {
 		logf("pegasus:   %s", line)
 	}
-	if len(cfg.SelfExternalIDs) == 0 {
+	// --- Live sources: opened (not started) first, so an unpaired or
+	// misplaced WhatsApp session fails fast with exit code 2, before any
+	// database work. Started only after the recovery snapshot (below).
+	sources := append([]LiveSource(nil), opts.Sources...)
+	if cfg.WhatsAppEnabled {
+		wa, err := wasource.Open(ctx, cfg.WhatsAppConfig(logf))
+		if err != nil {
+			return &ConfigError{Problems: []string{fmt.Sprintf("WhatsApp source: %v", err)}}
+		}
+		sources = append(sources, wa)
+		logf("pegasus: WhatsApp session opened (paired as %s)", strings.Join(redactIDs(wa.SelfExternalIDs()), ","))
+	}
+	defer func() {
+		for _, src := range sources {
+			if c, ok := src.(io.Closer); ok {
+				if err := c.Close(); err != nil {
+					logf("pegasus: close live source %q: %v", src.Name(), err)
+				}
+			}
+		}
+	}()
+
+	selfIDs := append([]string(nil), cfg.SelfExternalIDs...)
+	for _, src := range sources {
+		if si, ok := src.(selfIdentifier); ok {
+			selfIDs = mergeIDs(selfIDs, si.SelfExternalIDs())
+		}
+	}
+	switch {
+	case len(selfIDs) == 0 && len(sources) == 0:
 		logf("pegasus: WARNING: PEGASUS_SELF_EXTERNAL_IDS is empty. Harmless while no live source is enabled, " +
 			"but once one is, Marco's own outgoing messages would be attributed to a contact entity instead of to him. " +
 			"Set it before enabling any live source.")
+	case len(selfIDs) == 0:
+		logf("pegasus: WARNING: no self external IDs (PEGASUS_SELF_EXTERNAL_IDS is empty and no live source supplied one): Marco's own messages would be attributed to a contact entity")
+	default:
+		logf("pegasus: self external IDs: %s", strings.Join(redactIDs(selfIDs), ","))
 	}
 
 	wantVersion, err := db.LatestMigrationVersion()
@@ -197,7 +252,7 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		Triager:          triager,
 		Extractor:        extractor,
 		ActivityRecorder: nil, // see TODO(reflection) above
-		SelfExternalIDs:  cfg.SelfExternalIDs,
+		SelfExternalIDs:  selfIDs,
 		Logger:           logf,
 		Transcriber:      client,
 		AudioFetcher:     nil, // see TODO(live-audio) above
@@ -223,6 +278,16 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 			sd.run()
 			return fmt.Errorf("recovery snapshot: %w", err)
 		}
+		if opts.RecoveryFilter != nil {
+			kept := snapshot[:0]
+			for _, m := range snapshot {
+				if opts.RecoveryFilter(m) {
+					kept = append(kept, m)
+				}
+			}
+			snapshot = kept
+		}
+		emit(EventSnapshotTaken)
 	}
 
 	// --- Live-window flusher: its own context, cancelled explicitly in
@@ -237,11 +302,17 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 		sd.run()
 		return fmt.Errorf("health server: listen on %s: %w", cfg.HTTPAddr, err)
 	}
-	srv := newHTTPServer(cfg.HTTPAddr, newHealthHandler(&healthState{
+	hs := &healthState{
 		ping:           pool.Ping,
 		migrationErr:   migErr,
 		probeCostguard: probe,
-	}))
+	}
+	for _, src := range sources {
+		if hr, ok := src.(healthReporter); ok {
+			hs.sources = append(hs.sources, namedReporter{name: src.Name(), r: hr})
+		}
+	}
+	srv := newHTTPServer(cfg.HTTPAddr, newHealthHandler(hs))
 	sd.srv = srv
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -275,12 +346,12 @@ func Run(ctx context.Context, cfg *Config, opts Options) error {
 
 	// --- Intake sources ---
 	workCtx, cancelWork := context.WithCancel(context.Background())
-	in := &intake{workCtx: workCtx, process: a.ProcessLiveMessage}
+	in := &intake{workCtx: workCtx, timeout: cfg.LiveSinkTimeout, process: a.ProcessLiveMessage}
 	sd.intake, sd.cancelWork = in, cancelWork
-	if len(opts.Sources) == 0 {
+	if len(sources) == 0 {
 		logf("pegasus: no live sources configured")
 	}
-	for _, src := range opts.Sources {
+	for _, src := range sources {
 		g := in.newGate()
 		sd.sources = append(sd.sources, startedSource{src: src, gate: g})
 		if err := src.Start(workCtx, g.sink); err != nil {
@@ -447,6 +518,34 @@ func (s *shutdownState) run() error {
 		return ErrShutdownIncomplete
 	}
 	return nil
+}
+
+// mergeIDs appends ids not already present in base.
+func mergeIDs(base, ids []string) []string {
+	seen := make(map[string]bool, len(base))
+	for _, id := range base {
+		seen[id] = true
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			base = append(base, id)
+		}
+	}
+	return base
+}
+
+// redactIDs shortens external IDs (phone-number JIDs) for logs.
+func redactIDs(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		user, server, found := strings.Cut(id, "@")
+		out[i] = whatsapp.RedactUser(user)
+		if found {
+			out[i] += "@" + server
+		}
+	}
+	return out
 }
 
 func dbTarget(cfg *Config) string {
