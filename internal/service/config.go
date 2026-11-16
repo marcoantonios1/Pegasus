@@ -16,6 +16,7 @@ import (
 
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
+	"github.com/marcoantonios1/Pegasus/internal/identity"
 	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 )
 
@@ -42,7 +43,14 @@ type Config struct {
 	TranscriptionConfidenceThreshold float64
 	TranscriptionOpenAIProviderHint  string
 
-	SelfExternalIDs []string
+	// Self identity (see internal/identity). Identity is the validated,
+	// normalized registry built from the four fields below; nil only when
+	// loaded WithoutSelfIdentity (the pair command).
+	SelfName      string
+	SelfAliases   []string
+	SelfWhatsApp  []string
+	SelfInstagram []string
+	Identity      *identity.Registry
 
 	LiveWindowFlushAfter        time.Duration
 	LiveWindowFlushPollInterval time.Duration
@@ -77,6 +85,12 @@ type setting struct {
 	Required bool // must be non-empty after resolution
 	EnvOnly  bool // not accepted in the config file (implied by Secret)
 	apply    func(c *Config, v string) error
+	// applyList marks a list setting: ";"-separated in the environment
+	// (commas can appear in display names), a JSON array of strings in
+	// the config file (so entries may contain anything).
+	applyList func(c *Config, vs []string) error
+	// self marks the self-identity settings (skipped WithoutSelfIdentity).
+	self bool
 }
 
 // FileKey is the setting's key in the JSON config file: the env var name
@@ -160,9 +174,18 @@ var settings = []setting{
 	{Env: "PEGASUS_TRANSCRIPTION_OPENAI_PROVIDER_HINT", Default: api.DefaultOpenAIProviderHint, Desc: "Costguard provider name sent as X-Costguard-Provider on escalated transcription calls.",
 		apply: func(c *Config, v string) error { c.TranscriptionOpenAIProviderHint = v; return requireNonEmpty(v) }},
 
-	{Env: "PEGASUS_SELF_EXTERNAL_IDS", Default: "",
-		Desc:  "Comma-separated platform sender IDs (e.g. WhatsApp JIDs) that are Marco himself. Empty is allowed but logged loudly: once a live source exists, his own messages would be attributed to a contact entity.",
-		apply: func(c *Config, v string) error { c.SelfExternalIDs = splitList(v); return nil }},
+	{Env: "PEGASUS_SELF_NAME", Default: "", self: true,
+		Desc:  "Required. Marco's name: the self entity's canonical_name (e.g. `Marco`). His messages appear under this name in every extraction window, and extracted subjects with this name resolve to him. Must match an existing self entity's name.",
+		apply: func(c *Config, v string) error { c.SelfName = v; return nil }},
+	{Env: "PEGASUS_SELF_ALIASES", Default: "", self: true,
+		Desc:      "Other names the extraction model may use for Marco (e.g. `Marco Antonios`), `;`-separated (a JSON array in the config file). Subjects matching one resolve to the self entity.",
+		applyList: func(c *Config, vs []string) error { c.SelfAliases = vs; return nil }},
+	{Env: "PEGASUS_SELF_WHATSAPP_IDS", Default: "", self: true,
+		Desc:      "Marco's WhatsApp sender identities, `;`-separated (a JSON array in the file): his JID or phone number (`+961 70 123 456` is expanded to `96170123456@s.whatsapp.net`; device suffixes are stripped), plus the label .txt exports use for his own messages (his WhatsApp profile name, e.g. `Marco`). The paired account must be in this list when the live source is enabled.",
+		applyList: func(c *Config, vs []string) error { c.SelfWhatsApp = vs; return nil }},
+	{Env: "PEGASUS_SELF_INSTAGRAM_NAMES", Default: "", self: true,
+		Desc:      "Marco's Instagram display names as they appear in exports' `sender_name`, `;`-separated (a JSON array in the file). One entry per name he has ever used: Instagram exports carry no stable ID (see docs/identity.md). Compared exactly after NFC + trim.",
+		applyList: func(c *Config, vs []string) error { c.SelfInstagram = vs; return nil }},
 
 	{Env: "PEGASUS_LIVE_WINDOW_FLUSH_AFTER", Default: api.DefaultLiveWindowFlushAfter.String(), Desc: "Flush an open live window after this long with no new message arriving.",
 		apply: func(c *Config, v string) (err error) { c.LiveWindowFlushAfter, err = parsePositiveDuration(v); return }},
@@ -270,13 +293,42 @@ func IsConfigError(err error) bool {
 // listing every problem at once. lookupEnv is os.LookupEnv in production;
 // configPath is the --config flag value (empty to fall back to
 // PEGASUS_CONFIG_FILE, then to no file).
-func LoadConfig(lookupEnv func(string) (string, bool), configPath string) (*Config, error) {
+// LoadOption adjusts LoadConfig.
+type LoadOption func(*loadOptions)
+
+type loadOptions struct{ skipSelf bool }
+
+// WithoutSelfIdentity skips the self-identity settings and their
+// validation. Only for commands that never ingest (pair).
+func WithoutSelfIdentity() LoadOption { return func(o *loadOptions) { o.skipSelf = true } }
+
+func LoadConfig(lookupEnv func(string) (string, bool), configPath string, opts ...LoadOption) (*Config, error) {
+	var o loadOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return loadSettings(lookupEnv, configPath, func(s setting) bool { return !(o.skipSelf && s.self) }, !o.skipSelf)
+}
+
+// LoadSelfIdentity resolves only the self-identity settings (env > file >
+// default) and validates them. For the cmd/ tools that build an API but
+// don't run the service (phase0_dryrun, backfill_embeddings): they must
+// refuse to ingest without the same identity the service uses.
+func LoadSelfIdentity(lookupEnv func(string) (string, bool), configPath string) (*identity.Registry, error) {
+	cfg, err := loadSettings(lookupEnv, configPath, func(s setting) bool { return s.self }, true)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Identity, nil
+}
+
+func loadSettings(lookupEnv func(string) (string, bool), configPath string, include func(setting) bool, withSelf bool) (*Config, error) {
 	var problems []string
 
 	if configPath == "" {
 		configPath, _ = lookupEnv(ConfigFileEnv)
 	}
-	fileVals := map[string]string{}
+	fileVals := map[string]fileValue{}
 	if configPath != "" {
 		var err error
 		fileVals, err = readConfigFile(configPath)
@@ -295,9 +347,36 @@ func LoadConfig(lookupEnv func(string) (string, bool), configPath string) (*Conf
 
 	cfg := &Config{}
 	for _, s := range settings {
+		if !include(s) {
+			continue
+		}
+		if s.applyList != nil {
+			var list []string
+			if v, ok := lookupEnv(s.Env); ok {
+				list = splitSemicolons(v)
+			} else if fv, ok := fileVals[s.FileKey()]; ok {
+				if !fv.isList {
+					problems = append(problems, fmt.Sprintf("config file key %q must be a JSON array of strings", s.FileKey()))
+					continue
+				}
+				list = fv.list
+			}
+			if err := s.applyList(cfg, list); err != nil {
+				problems = append(problems, fmt.Sprintf("%s is invalid: %v", s.Env, err))
+			}
+			continue
+		}
+
 		v, ok := lookupEnv(s.Env)
 		if !ok && !s.envOnly() {
-			v, ok = fileVals[s.FileKey()]
+			var fv fileValue
+			if fv, ok = fileVals[s.FileKey()]; ok {
+				if fv.isList {
+					problems = append(problems, fmt.Sprintf("config file key %q must be a string, number or boolean, not an array", s.FileKey()))
+					continue
+				}
+				v = fv.scalar
+			}
 		}
 		if !ok {
 			v = s.Default
@@ -320,16 +399,41 @@ func LoadConfig(lookupEnv func(string) (string, bool), configPath string) (*Conf
 		}
 	}
 
+	if withSelf {
+		reg, selfProblems := identity.New(identity.Config{
+			SelfName: cfg.SelfName, Aliases: cfg.SelfAliases,
+			WhatsApp: cfg.SelfWhatsApp, Instagram: cfg.SelfInstagram,
+		})
+		for _, p := range selfProblems {
+			problems = append(problems, "self identity (PEGASUS_SELF_*): "+p)
+		}
+		if len(selfProblems) == 0 {
+			cfg.Identity = reg
+			// Store the normalized forms (JIDs expanded, NFC-trimmed).
+			cfg.SelfName = reg.SelfName()
+			cfg.SelfAliases = reg.Aliases()
+			cfg.SelfWhatsApp = reg.Identities(identity.WhatsApp)
+			cfg.SelfInstagram = reg.Identities(identity.Instagram)
+		}
+	}
+
 	if len(problems) > 0 {
 		return nil, &ConfigError{Problems: problems}
 	}
 	return cfg, nil
 }
 
+// fileValue is one config-file entry: a scalar or a list of strings.
+type fileValue struct {
+	scalar string
+	list   []string
+	isList bool
+}
+
 // readConfigFile decodes the JSON config file strictly: unknown keys and
 // env-only (secret) keys are errors. Values may be JSON strings, numbers
 // or booleans; they are passed through the same parsers as env values.
-func readConfigFile(path string) (map[string]string, error) {
+func readConfigFile(path string) (map[string]fileValue, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("config file %s: %w", path, err)
@@ -355,7 +459,7 @@ func readConfigFile(path string) (map[string]string, error) {
 	sort.Strings(keys)
 
 	var problems []string
-	out := map[string]string{}
+	out := map[string]fileValue{}
 	for _, k := range keys {
 		s, ok := known[k]
 		switch {
@@ -366,12 +470,21 @@ func readConfigFile(path string) (map[string]string, error) {
 			problems = append(problems, fmt.Sprintf("config file %s: key %q is not allowed in the file; set %s in the environment", path, k, s.Env))
 			continue
 		}
+		if s.applyList != nil {
+			var list []string
+			if err := json.Unmarshal(raw[k], &list); err != nil {
+				problems = append(problems, fmt.Sprintf("config file %s: key %q must be a JSON array of strings", path, k))
+				continue
+			}
+			out[k] = fileValue{list: list, isList: true}
+			continue
+		}
 		v, err := jsonScalar(raw[k])
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("config file %s: key %q: %v", path, k, err))
 			continue
 		}
-		out[k] = v
+		out[k] = fileValue{scalar: v}
 	}
 	if len(problems) > 0 {
 		return nil, &ConfigError{Problems: problems}
@@ -439,7 +552,10 @@ func (c *Config) displayValues() map[string]string {
 		"PEGASUS_TRANSCRIPTION_CONFIDENCE_THRESHOLD": strconv.FormatFloat(c.TranscriptionConfidenceThreshold, 'g', -1, 64),
 		"PEGASUS_TRANSCRIPTION_OPENAI_PROVIDER_HINT": c.TranscriptionOpenAIProviderHint,
 
-		"PEGASUS_SELF_EXTERNAL_IDS": strings.Join(redactIDs(c.SelfExternalIDs), ","),
+		"PEGASUS_SELF_NAME":            c.SelfName,
+		"PEGASUS_SELF_ALIASES":         strings.Join(c.SelfAliases, ";"),
+		"PEGASUS_SELF_WHATSAPP_IDS":    strings.Join(redactIDs(c.SelfWhatsApp), ";"),
+		"PEGASUS_SELF_INSTAGRAM_NAMES": strings.Join(c.SelfInstagram, ";"),
 
 		"PEGASUS_LIVE_WINDOW_FLUSH_AFTER":         c.LiveWindowFlushAfter.String(),
 		"PEGASUS_LIVE_WINDOW_FLUSH_POLL_INTERVAL": c.LiveWindowFlushPollInterval.String(),
@@ -516,6 +632,20 @@ func validateHTTPURL(v string) error {
 		return fmt.Errorf("must be an absolute http:// or https:// URL")
 	}
 	return nil
+}
+
+// splitSemicolons splits a ";" list, trimming entries. A wholly empty
+// value is an empty list; empty entries inside are kept so validation can
+// reject them ("Marco;;x" is almost certainly a typo).
+func splitSemicolons(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ";")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }
 
 func splitList(v string) []string {

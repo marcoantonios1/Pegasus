@@ -13,7 +13,18 @@ import (
 
 const testSecret = "s3cr3t-do-not-print-7f9a"
 
+// envMap is the environment m plus a valid self identity unless m sets
+// one itself (most tests are about other settings).
 func envMap(m map[string]string) func(string) (string, bool) {
+	full := map[string]string{"PEGASUS_SELF_NAME": "Marco", "PEGASUS_SELF_WHATSAPP_IDS": "+961 70 123 456"}
+	for k, v := range m {
+		full[k] = v
+	}
+	return rawEnvMap(full)
+}
+
+// rawEnvMap is exactly m.
+func rawEnvMap(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
 		v, ok := m[k]
 		return v, ok
@@ -54,7 +65,11 @@ func TestLoadConfig_DefaultsApply(t *testing.T) {
 		{"RecoverOnStart", cfg.RecoverOnStart, true},
 		{"HTTPAddr", cfg.HTTPAddr, DefaultHTTPAddr},
 		{"ShutdownTimeout", cfg.ShutdownTimeout, DefaultShutdownTimeout},
-		{"SelfExternalIDs", len(cfg.SelfExternalIDs), 0},
+		{"SelfName", cfg.SelfName, "Marco"},
+		{"SelfWhatsApp", strings.Join(cfg.SelfWhatsApp, ";"), "96170123456@s.whatsapp.net"},
+		{"SelfAliases", len(cfg.SelfAliases), 0},
+		{"SelfInstagram", len(cfg.SelfInstagram), 0},
+		{"Identity", cfg.Identity != nil, true},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -145,10 +160,11 @@ func TestLoadConfig_SecretNeverInErrorsOrDump(t *testing.T) {
 }
 
 func TestLoadConfig_EnvOverridesFile(t *testing.T) {
-	p := writeFile(t, `{"db_host": "from-file", "db_port": 6543, "recover_on_start": false, "self_external_ids": "a@s.whatsapp.net, b@s.whatsapp.net"}`)
-	cfg, err := LoadConfig(envMap(map[string]string{
+	p := writeFile(t, `{"db_host": "from-file", "db_port": 6543, "recover_on_start": false, "self_whatsapp_ids": ["+961 70 123 456", "Marco, from export"]}`)
+	cfg, err := LoadConfig(rawEnvMap(map[string]string{
 		"POSTGRES_PASSWORD": testSecret,
 		"PEGASUS_DB_HOST":   "from-env",
+		"PEGASUS_SELF_NAME": "Marco",
 	}), p)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -159,12 +175,12 @@ func TestLoadConfig_EnvOverridesFile(t *testing.T) {
 	if cfg.DBPort != 6543 || cfg.RecoverOnStart {
 		t.Errorf("file values should apply where env is unset: port=%d recover=%v", cfg.DBPort, cfg.RecoverOnStart)
 	}
-	if len(cfg.SelfExternalIDs) != 2 || cfg.SelfExternalIDs[1] != "b@s.whatsapp.net" {
-		t.Errorf("SelfExternalIDs: %v", cfg.SelfExternalIDs)
+	if got := strings.Join(cfg.SelfWhatsApp, ";"); got != "96170123456@s.whatsapp.net;Marco, from export" {
+		t.Errorf("self whatsapp ids from the file (array, commas kept): %q", got)
 	}
 
 	// PEGASUS_CONFIG_FILE is honored when no --config path is given.
-	cfg, err = LoadConfig(envMap(map[string]string{"POSTGRES_PASSWORD": testSecret, ConfigFileEnv: p}), "")
+	cfg, err = LoadConfig(rawEnvMap(map[string]string{"POSTGRES_PASSWORD": testSecret, "PEGASUS_SELF_NAME": "Marco", ConfigFileEnv: p}), "")
 	if err != nil || cfg.DBHost != "from-file" {
 		t.Fatalf("PEGASUS_CONFIG_FILE not honored: %v %+v", err, cfg)
 	}
@@ -200,4 +216,98 @@ func TestResolveHTTPAddr_IgnoresOtherSettings(t *testing.T) {
 	if got := dialableAddr(":8095"); got != "127.0.0.1:8095" {
 		t.Errorf("dialableAddr: %q", got)
 	}
+}
+
+func TestLoadConfig_SelfIdentity(t *testing.T) {
+	t.Run("semicolon lists, normalization", func(t *testing.T) {
+		cfg, err := LoadConfig(rawEnvMap(map[string]string{
+			"POSTGRES_PASSWORD":            testSecret,
+			"PEGASUS_SELF_NAME":            " Marco ",
+			"PEGASUS_SELF_ALIASES":         "Marco Antonios; M. Antonios",
+			"PEGASUS_SELF_WHATSAPP_IDS":    "+961 70 123 456; 96170123456:7@s.whatsapp.net ;Marco",
+			"PEGASUS_SELF_INSTAGRAM_NAMES": "Antonios, Marco;André M",
+		}), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.SelfName != "Marco" || strings.Join(cfg.SelfAliases, "|") != "Marco Antonios|M. Antonios" {
+			t.Errorf("name/aliases: %q %q", cfg.SelfName, cfg.SelfAliases)
+		}
+		// Phone number and device-suffixed JID collapse to one identity.
+		if got := strings.Join(cfg.SelfWhatsApp, "|"); got != "96170123456@s.whatsapp.net|Marco" {
+			t.Errorf("whatsapp: %q", got)
+		}
+		// Commas survive (they appear in display names); NFC applied.
+		if got := strings.Join(cfg.SelfInstagram, "|"); got != "Antonios, Marco|André M" {
+			t.Errorf("instagram: %q", got)
+		}
+		if !cfg.Identity.IsSelf("whatsapp", "96170123456:2@s.whatsapp.net") || cfg.Identity.IsSelf("instagram", "96170123456@s.whatsapp.net") {
+			t.Error("registry not platform-scoped as configured")
+		}
+	})
+
+	t.Run("all problems together", func(t *testing.T) {
+		_, err := LoadConfig(rawEnvMap(map[string]string{
+			"POSTGRES_PASSWORD":            testSecret,
+			"PEGASUS_SELF_ALIASES":         "Mo",
+			"PEGASUS_SELF_WHATSAPP_IDS":    "12036302@g.us;;",
+			"PEGASUS_SELF_INSTAGRAM_NAMES": "ab",
+			"PEGASUS_DB_PORT":              "nope",
+		}), "")
+		if err == nil || !IsConfigError(err) {
+			t.Fatalf("want a ConfigError, got %v", err)
+		}
+		for _, want := range []string{"PEGASUS_DB_PORT", "self name is required", `alias "Mo" is shorter`, "not a person JID", "empty entry", `instagram identity "ab" is shorter`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("missing %q in:\n%v", want, err)
+			}
+		}
+	})
+
+	t.Run("no identity on any platform", func(t *testing.T) {
+		_, err := LoadConfig(rawEnvMap(map[string]string{"POSTGRES_PASSWORD": testSecret, "PEGASUS_SELF_NAME": "Marco"}), "")
+		if err == nil || !strings.Contains(err.Error(), "no self identity is configured") {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("file arrays, env wins", func(t *testing.T) {
+		p := writeFile(t, `{"self_name": "Marco", "self_whatsapp_ids": ["Marco; with a semicolon", "+961 70 123 456"], "self_instagram_names": ["From File"]}`)
+		cfg, err := LoadConfig(rawEnvMap(map[string]string{
+			"POSTGRES_PASSWORD":            testSecret,
+			"PEGASUS_SELF_INSTAGRAM_NAMES": "From Env",
+		}), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(cfg.SelfWhatsApp, "|"); got != "Marco; with a semicolon|96170123456@s.whatsapp.net" {
+			t.Errorf("file array (semicolon kept in an entry): %q", got)
+		}
+		if got := strings.Join(cfg.SelfInstagram, "|"); got != "From Env" {
+			t.Errorf("env should override the file: %q", got)
+		}
+
+		bad := writeFile(t, `{"self_name": "Marco", "self_whatsapp_ids": "Marco"}`)
+		if _, err := LoadConfig(rawEnvMap(map[string]string{"POSTGRES_PASSWORD": testSecret}), bad); err == nil || !strings.Contains(err.Error(), "JSON array") {
+			t.Errorf("a string where an array is required: %v", err)
+		}
+	})
+
+	t.Run("pair skips it", func(t *testing.T) {
+		if _, err := LoadConfig(rawEnvMap(map[string]string{"POSTGRES_PASSWORD": testSecret}), "", WithoutSelfIdentity()); err != nil {
+			t.Errorf("WithoutSelfIdentity: %v", err)
+		}
+	})
+
+	t.Run("LoadSelfIdentity ignores unrelated settings", func(t *testing.T) {
+		reg, err := LoadSelfIdentity(rawEnvMap(map[string]string{
+			"PEGASUS_DB_PORT": "nope", "PEGASUS_SELF_NAME": "Marco", "PEGASUS_SELF_INSTAGRAM_NAMES": "Marco Antonios",
+		}), "")
+		if err != nil || reg.SelfName() != "Marco" {
+			t.Fatalf("got %v, %v", reg, err)
+		}
+		if _, err := LoadSelfIdentity(rawEnvMap(nil), ""); err == nil {
+			t.Error("no self identity must fail")
+		}
+	})
 }

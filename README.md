@@ -145,8 +145,9 @@ then **check** the schema version. The service never runs migrations. If
 `schema_migrations` is missing, dirty, or behind/ahead of the newest
 `db/migrations/*.up.sql` compiled into the binary, it exits telling you to
 run `docker compose up migrate`. Then it builds the Costguard client and
-does a non-fatal reachability probe. It builds the pipeline, takes the
-recovery snapshot **before** any intake starts, starts the live-window
+does a non-fatal reachability probe. It builds the pipeline, **bootstraps
+the self identity** (see "Self identity"), takes the recovery snapshot
+**before** any intake starts, starts the live-window
 flusher and the health server, and starts background recovery. Live
 sources start last.
 
@@ -181,8 +182,68 @@ the import to finish, or set `PEGASUS_RECOVER_ON_START=false` for that start.
 Not wired yet (logged at startup): the reflection engine (no consolidation
 orchestrator yet), and live voice transcription (needs an `AudioFetcher`
 built on whatsmeow's `Download`). With WhatsApp enabled, the paired
-account's own JID is added to the self IDs automatically, so
-`PEGASUS_SELF_EXTERNAL_IDS` only needs other identities (if any).
+account must be one of the configured WhatsApp self identities (see "Self
+identity"); it is never added implicitly.
+
+## Self identity
+
+Marco is one entity in the graph: the single `is_self = true` entity. All
+his messages, on every platform, are stored with that entity as sender, and
+facts the model extracts about him land on it. That matters beyond
+bookkeeping: **corrections are only honoured when the message's sender is
+the self entity**, so a wrong or missing identity silently disables them.
+
+Configure it with four settings (see "Configuration"):
+
+```
+PEGASUS_SELF_NAME=Marco
+PEGASUS_SELF_ALIASES=Marco Antonios
+PEGASUS_SELF_WHATSAPP_IDS=+961 70 123 456;Marco
+PEGASUS_SELF_INSTAGRAM_NAMES=Marco Antonios
+```
+
+- **`PEGASUS_SELF_NAME`** becomes the self entity's `canonical_name`. Every
+  extraction window labels his messages with it, on live, import and
+  recovery paths alike, so the model always sees "Marco".
+- **Aliases**, the self name and every identity string are also matched
+  (case-insensitively) against extracted subjects and objects. So "Marco",
+  "Marco Antonios" or his JID never create a second entity for him.
+- **Identities are per platform.** A WhatsApp identity never matches an
+  Instagram sender, even with the same string.
+  - **WhatsApp:** his phone number or JID (`+961 70 123 456` is expanded to
+    `96170123456@s.whatsapp.net`, device suffixes are stripped). Add the
+    label `.txt` exports use for his own messages. Checked against two real
+    exports, that label is **his WhatsApp profile name, `Marco`**; it is not
+    `You` or a number.
+  - **Instagram:** the display names his messages carry (`sender_name`),
+    one entry per name he has ever used. Instagram exports have no stable
+    sender ID; see [docs/identity.md](docs/identity.md) for why, and for
+    the risks.
+- In the environment, lists are `;`-separated (commas appear in display
+  names). In the JSON config file they are arrays.
+- Names shorter than 3 characters and empty entries are rejected.
+
+**Startup bootstrap.** After the migration check, and before recovery or
+any live source starts, the service loads the existing self entity, or
+creates it named `PEGASUS_SELF_NAME`. It refuses to start, with exit code 2,
+a message naming the entities involved, and no auto-repair, when:
+
+- the existing self entity has a different name;
+- a non-self entity already holds the self name, an alias or a configured
+  identity. Typically earlier runs attributed Marco's messages to a contact,
+  so two entities would claim to be him. Merging is a separate tool; for a
+  disposable dev database, wipe it.
+
+It also refuses a live WhatsApp session paired to an account that isn't in
+`PEGASUS_SELF_WHATSAPP_IDS`.
+
+A sender that is **not** a configured identity is never attributed to
+Marco, even if its name matches his. If such a name collides with the self
+entity, the message is refused with an error rather than misattributed.
+
+The `cmd/` tools that build an API (`phase0_dryrun`, `backfill_embeddings`)
+read the same settings (environment or `PEGASUS_CONFIG_FILE`) and fail fast
+without them. `pegasus pair` doesn't need them.
 
 ## Live WhatsApp
 
@@ -223,7 +284,9 @@ you to run the pair command.
    It then prints the paired account with the number redacted to its last
    digits (e.g. `Paired as …4567@s.whatsapp.net`) and exits 0. Running it
    again when already paired just says so.
-4. Set `PEGASUS_WHATSAPP_ENABLED=true` in `.env` and start the service:
+4. Make sure the paired number is in `PEGASUS_SELF_WHATSAPP_IDS` (the
+   service refuses to start otherwise), set `PEGASUS_WHATSAPP_ENABLED=true`
+   in `.env`, and start the service:
 
    ```
    docker compose up -d pegasus
@@ -363,7 +426,10 @@ its default, in `.env.example`.
 | `PEGASUS_COSTGUARD_TRANSCRIPTION_RETRY_BACKOFF` | `30s` | Wait before transcription's one retry after a Costguard 502. |
 | `PEGASUS_TRANSCRIPTION_CONFIDENCE_THRESHOLD` | `-0.7` | Escalate a local transcription to OpenAI when its mean segment avg_logprob is below this. Must be negative. Arabic always escalates regardless. |
 | `PEGASUS_TRANSCRIPTION_OPENAI_PROVIDER_HINT` | `openai_primary` | Costguard provider name for escalated transcription calls. |
-| `PEGASUS_SELF_EXTERNAL_IDS` | *(empty, warns)* | Comma-separated sender IDs (e.g. WhatsApp JIDs) that are Marco. |
+| `PEGASUS_SELF_NAME` | *(required)* | Marco's name: the self entity's `canonical_name` and his speaker label in every extraction window. Must match an existing self entity. |
+| `PEGASUS_SELF_ALIASES` | *(none)* | Other names the model may use for him, `;`-separated (JSON array in the file). |
+| `PEGASUS_SELF_WHATSAPP_IDS` | *(none)* | His WhatsApp phone number/JID plus his `.txt` export label (`Marco`), `;`-separated. At least one WhatsApp or Instagram identity is required. |
+| `PEGASUS_SELF_INSTAGRAM_NAMES` | *(none)* | His Instagram display names (every name he has used), `;`-separated. See docs/identity.md. |
 | `PEGASUS_LIVE_WINDOW_FLUSH_AFTER` | `5m0s` | Flush an open live window after this long with no new message. |
 | `PEGASUS_LIVE_WINDOW_FLUSH_POLL_INTERVAL` | `30s` | How often the idle flusher checks. |
 | `PEGASUS_RECOVER_ON_START` | `true` | Re-extract all `processed=false` messages with text in the background at startup (see the caveat above). |

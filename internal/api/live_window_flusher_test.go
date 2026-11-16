@@ -167,7 +167,7 @@ func TestFlushIdleWindows_FlushesAfterThreshold(t *testing.T) {
 		{Subject: "Flush Threshold Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "flush-conv-" + uuid.New().String()
@@ -223,7 +223,7 @@ func TestFlushIdleWindows_NotFlushedBeforeThreshold(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	extractor := &fakeExtractor{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "not-yet-conv-" + uuid.New().String()
@@ -261,7 +261,7 @@ func TestFlushIdleWindows_NewMessageResetsIdleClock(t *testing.T) {
 		{Subject: "Reset Idle Clock Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "reset-conv-" + uuid.New().String()
@@ -301,7 +301,7 @@ func TestFlushIdleWindows_ConversationsAreIndependent(t *testing.T) {
 		{Subject: "Independent Conv Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	convAExternal := "indep-conv-a-" + uuid.New().String()
@@ -349,7 +349,7 @@ func TestFlushIdleWindows_HistorySyncBurstNotFlushedPrematurely(t *testing.T) {
 		{Subject: "History Sync Burst Contact", Predicate: "likes", Object: "tea", ObjectType: "literal", Confidence: 0.8},
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: extractor, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "history-burst-conv-" + uuid.New().String()
@@ -449,7 +449,7 @@ func TestStartLiveWindowFlusher_FlushesViaRealGoroutine(t *testing.T) {
 		WithPipeline(PipelineDeps{
 			Triager: triager, Extractor: extractor,
 			LiveWindowFlushAfter: 5 * time.Minute, LiveWindowFlushPollInterval: 10 * time.Millisecond,
-		}).
+		}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "real-flusher-conv-" + uuid.New().String()
@@ -495,7 +495,7 @@ func TestStartLiveWindowFlusher_ShutdownFlushesAllOpenWindows(t *testing.T) {
 		WithPipeline(PipelineDeps{
 			Triager: triager, Extractor: extractor,
 			LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: 10 * time.Millisecond,
-		}).
+		}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	convAExternal := "shutdown-conv-a-" + uuid.New().String()
@@ -545,7 +545,7 @@ func TestFlushIdleWindows_ConcurrentArrivalDuringFlush(t *testing.T) {
 		release: release,
 	}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).
-		WithPipeline(PipelineDeps{Triager: triager, Extractor: blocking, LiveWindowFlushAfter: 5 * time.Minute}).
+		WithPipeline(PipelineDeps{Triager: triager, Extractor: blocking, LiveWindowFlushAfter: 5 * time.Minute}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "concurrent-flush-conv-" + uuid.New().String()
@@ -676,7 +676,7 @@ func TestFlushIdleWindows_NeverCallsRecordActivity(t *testing.T) {
 		WithPipeline(PipelineDeps{
 			Triager: triager, Extractor: extractor, ActivityRecorder: recorder,
 			LiveWindowFlushAfter: 5 * time.Minute,
-		}).
+		}).withTestSelf(t).
 		WithClock(clock.Now)
 
 	conversationExternalID := "no-activity-conv-" + uuid.New().String()
@@ -733,7 +733,7 @@ func TestStartLiveWindowFlusher_DoneClosesOnlyAfterFinalFlush(t *testing.T) {
 		WithPipeline(PipelineDeps{
 			Triager: &fakeTriager{candidate: true}, Extractor: extractor,
 			LiveWindowFlushAfter: time.Hour, LiveWindowFlushPollInterval: 10 * time.Millisecond,
-		})
+		}).withTestSelf(t)
 
 	convExternal := "done-chan-conv-" + uuid.New().String()
 	externalID := sendLiveMessage(t, ctx, a, convExternal, "done-chan-sender-"+uuid.New().String(), time.Now())

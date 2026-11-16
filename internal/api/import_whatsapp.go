@@ -164,7 +164,7 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 	var messageIDs []uuid.UUID
 	var mediaTypes []string
 	for _, r := range raws {
-		sender, err := a.resolveSender(ctx, r.SenderExternalID)
+		sender, err := a.resolveSender(ctx, r.Platform, r.SenderExternalID)
 		if err != nil {
 			return result, fmt.Errorf("ImportWhatsApp: resolve sender: %w", err)
 		}
@@ -245,7 +245,7 @@ func (a *API) ImportWhatsApp(ctx context.Context, exportPath string) (*ImportRes
 			}
 		}
 
-		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: r.SenderExternalID, Timestamp: r.Timestamp, Text: text})
+		windowMsgs = append(windowMsgs, extraction.WindowMessage{Speaker: a.speakerLabel(sender, r.SenderExternalID), Timestamp: r.Timestamp, Text: text})
 		messageIDs = append(messageIDs, msg.ID)
 		mediaTypes = append(mediaTypes, r.MediaType)
 	}

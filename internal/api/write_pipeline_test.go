@@ -89,7 +89,7 @@ func TestProcessLiveMessage_WindowTriggersExtractionWithCorrectSourceWeight(t *t
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor, ActivityRecorder: recorder,
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "conv-" + uuid.New().String()
 	senderExternalID := "sender-" + uuid.New().String()
@@ -205,7 +205,7 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 	bulkTriager := &fakeTriager{candidate: true}
 	bulkAPI := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: bulkTriager, Extractor: bulkExtractor,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name: conversation_id is derived from
@@ -246,7 +246,7 @@ func TestImportWhatsApp_MatchesLivePathOutput(t *testing.T) {
 	liveTriager := &fakeTriager{candidate: true}
 	liveAPI := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: liveTriager, Extractor: liveExtractor,
-	})
+	}).withTestSelf(t)
 
 	// Live windowing closes on a DIFFERENT bound than historical
 	// (extraction.MaxLiveWindowMessages = 10 messages or 5 minutes,
@@ -676,7 +676,7 @@ func TestStoreExtractedTriples_EmbeddingFailureLogsAndContinues(t *testing.T) {
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	triples := []extraction.ExtractedTriple{
 		{Subject: subject.CanonicalName, Predicate: "likes", Object: "chess", ObjectType: "literal", Confidence: 0.9},
@@ -750,7 +750,7 @@ func TestEmbeddingPipeline_WrittenEmbeddingIsRetrievable(t *testing.T) {
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "conv-" + uuid.New().String()
 	senderExternalID := "sender-" + uuid.New().String()

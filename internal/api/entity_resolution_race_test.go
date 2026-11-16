@@ -43,9 +43,7 @@ func TestResolveSender_ConcurrentSelfResolutionProducesOneEntity(t *testing.T) {
 	ctx := context.Background()
 
 	selfExternalID := "concurrent-self-" + uuid.New().String()
-	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		SelfExternalIDs: []string{selfExternalID},
-	})
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{}).withTestSelf(t, selfExternalID)
 
 	const goroutines = 24
 	var wg sync.WaitGroup
@@ -59,7 +57,7 @@ func TestResolveSender_ConcurrentSelfResolutionProducesOneEntity(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			e, err := a.resolveSender(ctx, selfExternalID)
+			e, err := a.resolveSender(ctx, "whatsapp", selfExternalID)
 			errs[i] = err
 			if err == nil {
 				ids[i] = e.ID

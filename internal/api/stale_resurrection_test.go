@@ -133,7 +133,7 @@ func TestStoreExtractedTriples_StaleResurrectionIsSkipped(t *testing.T) {
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	t1 := time.Now()
 	correctionMsg := createTestMessage(t, ctx, ts, uuid.New(), self.ID, "text", t1)
@@ -286,7 +286,7 @@ func TestStoreExtractedTriples_StaleResurrectionFallsBackToFirstSeen(t *testing.
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	// A message timestamped before the correcting edge's FirstSeen — the
 	// fallback comparison point — reasserting Acme.

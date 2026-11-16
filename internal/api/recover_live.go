@@ -178,7 +178,7 @@ func (a *API) recoverOneConversation(ctx context.Context, conversationID uuid.UU
 			continue
 		}
 
-		wm := extraction.WindowMessage{Speaker: sender.CanonicalName, Timestamp: m.Timestamp, Text: text}
+		wm := extraction.WindowMessage{Speaker: a.speakerLabel(sender, sender.CanonicalName), Timestamp: m.Timestamp, Text: text}
 		completed, ready := windower.Add(wm)
 		pendingIDs = append(pendingIDs, m.ID)
 		pendingMediaTypes = append(pendingMediaTypes, m.MediaType)

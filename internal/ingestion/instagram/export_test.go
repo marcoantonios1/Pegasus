@@ -324,3 +324,36 @@ func TestParseExport_MojibakeSenderName(t *testing.T) {
 		t.Errorf("mojibake not corrected in sender name: want %q, got %q", want, msgs[0].SenderExternalID)
 	}
 }
+
+// TestSenderExternalID_IsTheDisplayName pins the docs/identity.md finding:
+// SenderExternalID is the (mojibake-repaired) sender_name, so the same name
+// in two exports yields the same ID, and a renamed sender yields a
+// different one: a different entity, and (because the synthesized
+// ExternalID hashes the sender) different message IDs too.
+func TestSenderExternalID_IsTheDisplayName(t *testing.T) {
+	export := func(sender string) ingestion.RawMessage {
+		t.Helper()
+		doc := `{"thread_path": "inbox/stability_1", "messages": [{"sender_name": ` + jsonQuote(sender) + `, "timestamp_ms": 1735707600000, "content": "same message"}]}`
+		msgs, err := NewExportParser().Parse(strings.NewReader(doc))
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("parse: %v (%d msgs)", err, len(msgs))
+		}
+		return msgs[0]
+	}
+
+	first, again := export("Yasmine 🌸"), export("Yasmine 🌸")
+	if first.SenderExternalID != "Yasmine 🌸" || again.SenderExternalID != first.SenderExternalID || again.ExternalID != first.ExternalID {
+		t.Errorf("same sender_name in two exports: %q/%q, ids %q/%q", first.SenderExternalID, again.SenderExternalID, first.ExternalID, again.ExternalID)
+	}
+
+	renamed := export("Yasmine K")
+	if renamed.SenderExternalID == first.SenderExternalID {
+		t.Error("a renamed sender should yield a different SenderExternalID")
+	}
+	if renamed.ExternalID == first.ExternalID {
+		t.Error("expected the rename to change the synthesized message ExternalID as well (documented consequence)")
+	}
+	if renamed.ConversationID != first.ConversationID {
+		t.Error("thread_path unchanged here, so the conversation ID should be too")
+	}
+}

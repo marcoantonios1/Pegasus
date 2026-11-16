@@ -56,7 +56,7 @@ func TestStoreExtractedTriples_CorrectionFromNonSelfIsDowngraded(t *testing.T) {
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, []uuid.UUID{msg.ID}, time.Now())
 	if err != nil {
@@ -168,10 +168,8 @@ func TestStoreExtractedTriples_CorrectionFromSelfRoutesToCorrectionPath(t *testi
 	// does GetSelf-or-create, the same idempotent pattern every other
 	// self-entity-needing test in this session has had to use against
 	// this same shared table.
-	selfResolver := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		SelfExternalIDs: []string{"correction-gate-test-self"},
-	})
-	selfEntity, err := selfResolver.resolveSender(ctx, "correction-gate-test-self")
+	selfResolver := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{}).withTestSelf(t, "correction-gate-test-self")
+	selfEntity, err := selfResolver.resolveSender(ctx, "whatsapp", "correction-gate-test-self")
 	if err != nil {
 		t.Fatalf("resolve self entity: %v", err)
 	}
@@ -253,10 +251,9 @@ func TestImportWhatsApp_DefaultPolicyDowngradesSelfCorrectionToNormalClaim(t *te
 	triager := &fakeTriager{candidate: true}
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		Triager: triager, Extractor: extractor, SelfExternalIDs: []string{"Marco"},
-		// HonorCorrectionsOnImport left at its zero value (false) — the
+		Triager: triager, Extractor: extractor, // HonorCorrectionsOnImport left at its zero value (false) — the
 		// default this test specifically exercises.
-	})
+	}).withTestSelf(t, "Marco")
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name: conversation_id derives from the
@@ -323,9 +320,8 @@ func TestImportWhatsApp_HonorCorrectionsOnImportTrueAllowsCorrectionPath(t *test
 	triager := &fakeTriager{candidate: true}
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		Triager: triager, Extractor: extractor, SelfExternalIDs: []string{"Marco"},
-		HonorCorrectionsOnImport: true,
-	})
+		Triager: triager, Extractor: extractor, HonorCorrectionsOnImport: true,
+	}).withTestSelf(t, "Marco")
 
 	dir := t.TempDir()
 	exportPath := filepath.Join(dir, "HonorTrueImport-"+uuid.New().String()+".txt")
@@ -389,7 +385,7 @@ func TestProcessLiveMessage_ForgedHeaderLiveWindowProducesJSONLPrompt(t *testing
 	extractor := &fakeExtractor{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "live-forged-" + uuid.New().String()
 	senderExternalID := "live-forged-sender-" + uuid.New().String()

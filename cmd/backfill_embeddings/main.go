@@ -62,6 +62,7 @@ import (
 	"github.com/marcoantonios1/Pegasus/internal/api"
 	"github.com/marcoantonios1/Pegasus/internal/extraction"
 	"github.com/marcoantonios1/Pegasus/internal/memory"
+	"github.com/marcoantonios1/Pegasus/internal/service"
 )
 
 // backfillBatchSize is both the unit BackfillEmbeddings is called with
@@ -103,6 +104,12 @@ func run() error {
 	// EmbeddingStore's vector column to round-trip without manual
 	// casting — a hard requirement for this tool specifically, since
 	// embedding storage is its entire job.
+	// Same self identity as the service (PEGASUS_SELF_*), checked
+	// before connecting (fail fast), then bound to the self entity below.
+	selfReg, err := service.LoadSelfIdentity(os.LookupEnv, "")
+	if err != nil {
+		return fmt.Errorf("self identity: %w", err)
+	}
 	pegasusCfg, err := pgxpool.ParseConfig(*pegasusDSN)
 	if err != nil {
 		return fmt.Errorf("parse pegasus DSN: %w", err)
@@ -139,6 +146,11 @@ func run() error {
 		// cmd/phase0_dryrun's own PipelineDeps.Logger wiring.
 		Logger: log.Printf,
 	})
+
+	// Bound to the self entity before anything else touches the data.
+	if _, err := a.BootstrapSelf(ctx, selfReg); err != nil {
+		return fmt.Errorf("bootstrap self identity: %w", err)
+	}
 
 	if *rebuild {
 		return runRebuild(ctx, messages, a)

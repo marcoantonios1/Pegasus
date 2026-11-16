@@ -306,6 +306,14 @@ func (s *EntityStore) GetSelf(ctx context.Context) (*Entity, error) {
 	return &e, nil
 }
 
+// CountSelf returns how many is_self entities exist (entities_single_self_idx
+// caps it at one; BootstrapSelf asserts exactly one).
+func (s *EntityStore) CountSelf(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM entities WHERE is_self`).Scan(&n)
+	return n, err
+}
+
 func (s *EntityStore) Update(ctx context.Context, e *Entity) error {
 	if e.Metadata == nil {
 		e.Metadata = map[string]any{}

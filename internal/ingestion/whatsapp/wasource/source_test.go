@@ -185,8 +185,8 @@ func TestCanonicalization(t *testing.T) {
 	rs := &sinkRecorder{}
 	s, _ := startSource(t, fc, rs, Config{})
 
-	if ids := s.SelfExternalIDs(); len(ids) != 1 || ids[0] != ownPN.String() {
-		t.Fatalf("SelfExternalIDs = %v, want [%s]", ids, ownPN)
+	if got := s.AccountID(); got != ownPN.String() || s.Platform() != "whatsapp" {
+		t.Fatalf("AccountID = %q on %q, want the device-free %s", got, s.Platform(), ownPN)
 	}
 
 	// 1. Incoming from a device-suffixed sender.

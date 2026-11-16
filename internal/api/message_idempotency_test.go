@@ -48,7 +48,7 @@ func TestImportWhatsApp_SecondImportIsIdempotent(t *testing.T) {
 	transcriber := &fakeTranscriber{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, embedder).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor, Transcriber: transcriber,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	exportFileName := "IdempotentImport-" + uuid.New().String() + ".txt"
@@ -142,7 +142,7 @@ func TestImportWhatsApp_OverlappingExportOnlyProcessesNewMessages(t *testing.T) 
 	triager := &fakeTriager{candidate: true}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	exportFileName := "OverlapConv-" + uuid.New().String() + ".txt"
@@ -249,7 +249,7 @@ func TestImportWhatsApp_ResumeOnlyReprocessesUnprocessedMessages(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	exportFileName := "ResumeConv-" + uuid.New().String() + ".txt"
@@ -327,7 +327,7 @@ func TestProcessLiveMessage_DuplicateRedeliveryYieldsOneRowOneWindowSlot(t *test
 	extractor := &fakeExtractor{}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "live-dup-" + uuid.New().String()
 	raw := ingestion.RawMessage{
@@ -380,7 +380,7 @@ func TestProcessLiveMessage_EmptyExternalIDNeverMerges(t *testing.T) {
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "empty-extid-" + uuid.New().String()
 	base := time.Now()

@@ -31,10 +31,8 @@ import (
 // ever, in this suite's real, persistent, shared dev database).
 func resolveTestSelfEntity(t *testing.T, ctx context.Context, ts *testStores, selfExternalID string) *memory.Entity {
 	t.Helper()
-	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		SelfExternalIDs: []string{selfExternalID},
-	})
-	self, err := a.resolveSender(ctx, selfExternalID)
+	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{}).withTestSelf(t, selfExternalID)
+	self, err := a.resolveSender(ctx, "whatsapp", selfExternalID)
 	if err != nil {
 		t.Fatalf("resolve self entity: %v", err)
 	}
@@ -86,8 +84,7 @@ func TestProcessLiveMessage_CorrectionEndToEnd(t *testing.T) {
 	}}
 
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
-		Triager: triager, Extractor: extractor, SelfExternalIDs: []string{selfExternalID},
-	})
+		Triager: triager, Extractor: extractor}).withTestSelf(t, selfExternalID)
 
 	conversationExternalID := "live-correction-conv-" + uuid.New().String()
 	base := time.Now()
@@ -255,7 +252,7 @@ func TestStoreExtractedTriples_AmbiguousWithoutReplacesObject(t *testing.T) {
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 	outcomes, err := a.storeExtractedTriples(ctx, triples, memory.SourceTypeWhatsAppText, []uuid.UUID{msg.ID}, time.Now())
 	if err != nil {
 		t.Fatalf("storeExtractedTriples: %v", err)

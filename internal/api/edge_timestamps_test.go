@@ -68,7 +68,7 @@ func TestImportWhatsApp_EdgeTimestampReflectsMessageDate(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	dir := t.TempDir()
 	// Uuid-suffixed, not a fixed name: conversation_id derives from the
@@ -136,7 +136,7 @@ func TestGetRelationshipHistory_ChronologicalOrderWithRealDates(t *testing.T) {
 	}}
 	a2019 := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor2019,
-	})
+	}).withTestSelf(t)
 	dir := t.TempDir()
 	path2019 := filepath.Join(dir, "Timeline2019-"+uuid.New().String()+".txt")
 	lines := make([]string, extraction.DefaultHistoricalWindowSize)
@@ -155,7 +155,7 @@ func TestGetRelationshipHistory_ChronologicalOrderWithRealDates(t *testing.T) {
 	}}
 	a2023 := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor2023,
-	})
+	}).withTestSelf(t)
 	path2023 := filepath.Join(dir, "Timeline2023-"+uuid.New().String()+".txt")
 	writeExportFile(t, path2023, "John", "14/3/23", lines)
 	if _, err := a2023.ImportWhatsApp(ctx, path2023); err != nil {
@@ -204,7 +204,7 @@ func TestGetRelevantContext_SinceFilterUsesFirstSeen(t *testing.T) {
 	}}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor2019,
-	})
+	}).withTestSelf(t)
 	dir := t.TempDir()
 	lines := make([]string, extraction.DefaultHistoricalWindowSize)
 	for i := range lines {
@@ -221,7 +221,7 @@ func TestGetRelevantContext_SinceFilterUsesFirstSeen(t *testing.T) {
 	}}
 	aRecent := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractorRecent,
-	})
+	}).withTestSelf(t)
 	recentYear := time.Now().Year() - 1
 	pathRecent := filepath.Join(dir, "SinceFilterRecent-"+uuid.New().String()+".txt")
 	writeExportFile(t, pathRecent, "John", fmt.Sprintf("14/3/%02d", recentYear%100), lines)
@@ -340,7 +340,7 @@ func TestProcessLiveMessage_HistorySyncOldTimestampNotNow(t *testing.T) {
 	triager := &fakeTriager{candidate: true}
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Triager: triager, Extractor: extractor,
-	})
+	}).withTestSelf(t)
 
 	conversationExternalID := "history-sync-" + uuid.New().String()
 	historical := time.Date(2018, 7, 1, 9, 0, 0, 0, time.UTC)
@@ -396,7 +396,7 @@ func TestStoreExtractedTriples_FutureDatedMessageIsClampedAndLogged(t *testing.T
 	var logLines []string
 	a := New(ts.edges, ts.messages, ts.entities, ts.embeds, ts.relStats, nil).WithPipeline(PipelineDeps{
 		Logger: func(format string, args ...any) { logLines = append(logLines, fmt.Sprintf(format, args...)) },
-	})
+	}).withTestSelf(t)
 
 	triple := extraction.ExtractedTriple{Subject: subject.CanonicalName, Predicate: predicate, Object: "chess", ObjectType: "literal", Confidence: 0.8}
 	outcomes, err := a.storeExtractedTriples(ctx, []extraction.ExtractedTriple{triple}, memory.SourceTypeWhatsAppText, []uuid.UUID{msg.ID}, now)
