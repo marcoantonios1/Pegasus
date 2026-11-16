@@ -92,7 +92,7 @@ const (
 // startup dump and of the docs.
 var settings = []setting{
 	{Env: ConfigFileEnv, Default: "", EnvOnly: true,
-		Desc: "Optional path to a JSON config file (keys are the setting names lower-cased without the PEGASUS_ prefix, e.g. `db_host`). The --config flag overrides this. Unknown keys are an error.",
+		Desc:  "Optional path to a JSON config file (keys are the setting names lower-cased without the PEGASUS_ prefix, e.g. `db_host`). The --config flag overrides this. Unknown keys are an error.",
 		apply: func(*Config, string) error { return nil }},
 
 	{Env: "PEGASUS_DB_HOST", Default: "localhost", Desc: "Postgres host.",
@@ -104,7 +104,7 @@ var settings = []setting{
 	{Env: "PEGASUS_DB_USER", Default: "pegasus", Desc: "Postgres user.",
 		apply: func(c *Config, v string) error { c.DBUser = v; return requireNonEmpty(v) }},
 	{Env: "POSTGRES_PASSWORD", Secret: true, Required: true,
-		Desc: "Postgres password. Secret: read only from the environment (the same variable docker-compose.yml's postgres service uses), never from the config file, never logged.",
+		Desc:  "Postgres password. Secret: read only from the environment (the same variable docker-compose.yml's postgres service uses), never from the config file, never logged.",
 		apply: func(c *Config, v string) error { c.DBPassword = v; return nil }},
 	{Env: "PEGASUS_DB_SSLMODE", Default: "disable", Desc: "libpq sslmode (disable, allow, prefer, require, verify-ca, verify-full).",
 		apply: func(c *Config, v string) error {
@@ -119,7 +119,7 @@ var settings = []setting{
 		apply: func(c *Config, v string) (err error) { c.DBConnectTimeout, err = parsePositiveDuration(v); return }},
 
 	{Env: "PEGASUS_COSTGUARD_URL", Default: DefaultCostguardURL,
-		Desc: "Costguard gateway base URL (same default as cmd/phase0_dryrun's --costguard-url). docker-compose.yml overrides it to http://host.docker.internal:8080 so the container reaches a Costguard running on the host.",
+		Desc:  "Costguard gateway base URL (same default as cmd/phase0_dryrun's --costguard-url). docker-compose.yml overrides it to http://host.docker.internal:8080 so the container reaches a Costguard running on the host.",
 		apply: func(c *Config, v string) error { c.CostguardURL = v; return validateHTTPURL(v) }},
 	{Env: "PEGASUS_COSTGUARD_AGENT", Default: "pegasus", Desc: "X-Costguard-Agent attribution tag sent on every model call.",
 		apply: func(c *Config, v string) error { c.CostguardAgent = v; return requireNonEmpty(v) }},
@@ -148,7 +148,7 @@ var settings = []setting{
 		apply: func(c *Config, v string) error { c.TranscriptionOpenAIProviderHint = v; return requireNonEmpty(v) }},
 
 	{Env: "PEGASUS_SELF_EXTERNAL_IDS", Default: "",
-		Desc: "Comma-separated platform sender IDs (e.g. WhatsApp JIDs) that are Marco himself. Empty is allowed but logged loudly: once a live source exists, his own messages would be attributed to a contact entity.",
+		Desc:  "Comma-separated platform sender IDs (e.g. WhatsApp JIDs) that are Marco himself. Empty is allowed but logged loudly: once a live source exists, his own messages would be attributed to a contact entity.",
 		apply: func(c *Config, v string) error { c.SelfExternalIDs = splitList(v); return nil }},
 
 	{Env: "PEGASUS_LIVE_WINDOW_FLUSH_AFTER", Default: api.DefaultLiveWindowFlushAfter.String(), Desc: "Flush an open live window after this long with no new message arriving.",
@@ -160,7 +160,7 @@ var settings = []setting{
 		}},
 
 	{Env: "PEGASUS_RECOVER_ON_START", Default: "true",
-		Desc: "Re-extract every processed=false message with text in the background at startup. Treats ALL such rows as backlog, so do not start the service while a bulk import is mid-flight.",
+		Desc:  "Re-extract every processed=false message with text in the background at startup. Treats ALL such rows as backlog, so do not start the service while a bulk import is mid-flight.",
 		apply: func(c *Config, v string) (err error) { c.RecoverOnStart, err = strconv.ParseBool(v); return }},
 
 	{Env: "PEGASUS_HTTP_ADDR", Default: DefaultHTTPAddr, Desc: "Listen address for /healthz and /readyz. docker-compose.yml sets 0.0.0.0:8095 inside the container and publishes it on 127.0.0.1 only.",
