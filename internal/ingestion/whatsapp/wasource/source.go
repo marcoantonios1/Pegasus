@@ -308,7 +308,7 @@ func (s *Source) onEvent(evt any) {
 	case *events.Disconnected:
 		s.markDisconnected()
 	case *events.LoggedOut:
-		s.fail("logged_out", fmt.Sprintf("the linked device was logged out or revoked (%v). Delete the session file and re-pair: %s", e.Reason, PairCommandHint))
+		s.fail("logged_out", fmt.Sprintf("the linked device was logged out or revoked (%v); whatsmeow has already removed it from the session store. Re-pair: %s", e.Reason, PairCommandHint))
 	case *events.StreamReplaced:
 		s.fail("stream_replaced", "another client connected with this same session (two processes share one session file, e.g. a `pair` run while the service was up). Stop the other process, then restart the service")
 	case *events.ClientOutdated:

@@ -215,9 +215,14 @@ you to run the pair command.
    On the phone: **Settings → Linked devices → Link a device**, then scan the
    code. Codes refresh every few seconds. If none is scanned in time, the
    command exits non-zero ("pairing timed out"); just run it again.
-3. On success it prints the paired account with the number redacted to its
-   last digits (e.g. `Paired as …4567@s.whatsapp.net`) and exits 0. Running
-   it again when already paired just says so.
+3. After the scan, **keep WhatsApp open on the phone and let the command
+   finish.** It stays connected for 30 seconds to 3 minutes while WhatsApp
+   reconnects the new device and sends its initial sync (which is
+   acknowledged, not imported). Disconnecting earlier leaves the link
+   half-finished, and the phone logs the device out about a minute later.
+   It then prints the paired account with the number redacted to its last
+   digits (e.g. `Paired as …4567@s.whatsapp.net`) and exits 0. Running it
+   again when already paired just says so.
 4. Set `PEGASUS_WHATSAPP_ENABLED=true` in `.env` and start the service:
 
    ```
@@ -246,8 +251,13 @@ account. So:
 - It uses the pure-Go SQLite driver (`modernc.org/sqlite`), so the image is
   still built with `CGO_ENABLED=0`.
 
-**Re-pairing:** unlink the device on the phone (Settings → Linked devices),
-stop the service, delete the session file, then run the pair command again.
+**Re-pairing after a logout** (`logged_out`): whatsmeow has already removed
+the dead device from the session store, so just stop the service and run the
+pair command again.
+
+**Re-pairing voluntarily** (the device is still linked): unlink it on the
+phone (Settings → Linked devices), stop the service, delete the session
+file, then run the pair command again.
 Under compose the image has no shell, so remove the whole session volume:
 `docker compose rm -sf pegasus && docker volume rm pegasus_whatsmeow_session`
 (the volume name is prefixed with the compose project name).
