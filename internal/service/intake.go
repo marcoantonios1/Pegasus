@@ -2,8 +2,8 @@ package service
 
 import (
 	"context"
-	"errors"
 	"sync"
+	"time"
 
 	"github.com/marcoantonios1/Pegasus/internal/ingestion"
 )
@@ -31,7 +31,9 @@ type LiveSource interface {
 
 // ErrIntakeClosed is returned by a source's sink once that source has
 // been stopped (or the service is shutting down).
-var ErrIntakeClosed = errors.New("pegasus: live intake is closed (service shutting down)")
+// It is ingestion.ErrSinkClosed, so sources can recognize it without
+// importing this package.
+var ErrIntakeClosed = ingestion.ErrSinkClosed
 
 // intake tracks every in-flight sink call across all sources, so shutdown
 // can wait for them to drain before the final window flush. Each call
@@ -40,6 +42,8 @@ var ErrIntakeClosed = errors.New("pegasus: live intake is closed (service shutti
 // only cancelled if draining exceeds its budget.
 type intake struct {
 	workCtx context.Context
+	// timeout bounds each process call (PEGASUS_LIVE_SINK_TIMEOUT); 0 = none.
+	timeout time.Duration
 	process func(ctx context.Context, m ingestion.RawMessage) error
 
 	wg sync.WaitGroup
@@ -66,7 +70,13 @@ func (g *gate) sink(m ingestion.RawMessage) error {
 	g.in.wg.Add(1)
 	g.mu.Unlock()
 	defer g.in.wg.Done()
-	return g.in.process(g.in.workCtx, m)
+	ctx := g.in.workCtx
+	if g.in.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, g.in.timeout)
+		defer cancel()
+	}
+	return g.in.process(ctx, m)
 }
 
 func (g *gate) close() {

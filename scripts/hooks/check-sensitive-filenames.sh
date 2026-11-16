@@ -35,6 +35,13 @@
 #   *run*.json    run.json and variants (run_bugs.json, run_v2.json,
 #                 demi-vronen-run.json, bugs-slice-gzipfix-run.json, ...)
 #
+# Credential patterns: WhatsApp (whatsmeow) session stores. Anyone holding
+# one of these files can read and send messages as the paired account.
+#   *.db *.db-wal *.db-shm *.sqlite *.sqlite3   SQLite databases and their
+#                 WAL/shared-memory companions (session.db, ...)
+#   whatsmeow*    anything named after the client library's store
+#                 (whatsmeow.db, whatsmeow-session, ...)
+#
 # These four patterns are deliberately broad (substring match, not exact
 # name match) — a false positive here costs a rename; a false negative
 # costs a repeat of the actual incident this exists to prevent. If a
@@ -42,7 +49,8 @@
 # than weakening these patterns.
 set -euo pipefail
 
-patterns=('*review*.md' '*sample*.md' '*summary*.md' '*run*.json')
+patterns=('*review*.md' '*sample*.md' '*summary*.md' '*run*.json'
+          '*.db' '*.db-wal' '*.db-shm' '*.sqlite' '*.sqlite3' 'whatsmeow*')
 
 matched=()
 while IFS= read -r path; do
@@ -60,7 +68,7 @@ done
 
 if [ "${#matched[@]}" -gt 0 ]; then
     {
-        echo "BLOCKED: the following file(s) match a known real-personal-data report-output pattern:"
+        echo "BLOCKED: the following file(s) match a known real-personal-data or credential filename pattern:"
         for m in "${matched[@]}"; do
             echo "  - $m"
         done
@@ -71,6 +79,10 @@ if [ "${#matched[@]}" -gt 0 ]; then
         echo "and cmd/whisper_spotcheck/NOTES.md. That output must always be written outside"
         echo "this repo (internal/reportpath.EnsureOutsideRepo enforces this in the tools"
         echo "themselves); it must never be committed."
+        echo
+        echo "*.db, *.db-wal, *.db-shm, *.sqlite, *.sqlite3 and whatsmeow* are WhatsApp session"
+        echo "stores: a credential for the paired account. They live outside the repo"
+        echo "(PEGASUS_WHATSAPP_SESSION_PATH) and must never be committed."
         echo
         echo "If this file genuinely isn't sensitive, rename it to avoid the pattern — don't"
         echo "bypass this check (--no-verify) instead."

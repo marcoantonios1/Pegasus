@@ -122,6 +122,11 @@ func TestComposeFile(t *testing.T) {
 				Test []string `json:"test"`
 			} `json:"healthcheck"`
 			ExtraHosts any `json:"extra_hosts"`
+			Volumes    []struct {
+				Type   string `json:"type"`
+				Source string `json:"source"`
+				Target string `json:"target"`
+			} `json:"volumes"`
 		} `json:"services"`
 	}
 	if err := json.Unmarshal(out, &cfg); err != nil {
@@ -155,6 +160,26 @@ func TestComposeFile(t *testing.T) {
 	if !strings.Contains(svc.Environment["PEGASUS_COSTGUARD_URL"], "host.docker.internal") {
 		t.Errorf("PEGASUS_COSTGUARD_URL = %q, want host.docker.internal default", svc.Environment["PEGASUS_COSTGUARD_URL"])
 	}
+	// The WhatsApp session lives on its own named volume, at the path the
+	// service is told to use, and the backup service never mounts it.
+	foundSession := false
+	for _, v := range svc.Volumes {
+		if v.Target == "/var/lib/pegasus/whatsmeow" {
+			foundSession = v.Type == "volume" && v.Source == "whatsmeow_session"
+		}
+	}
+	if !foundSession {
+		t.Errorf("pegasus must mount the whatsmeow_session named volume at /var/lib/pegasus/whatsmeow: %+v", svc.Volumes)
+	}
+	if got := svc.Environment["PEGASUS_WHATSAPP_SESSION_PATH"]; !strings.HasPrefix(got, "/var/lib/pegasus/whatsmeow/") {
+		t.Errorf("PEGASUS_WHATSAPP_SESSION_PATH = %q, want a path on the session volume", got)
+	}
+	for _, v := range cfg.Services["backup"].Volumes {
+		if v.Source == "whatsmeow_session" || strings.Contains(v.Target, "whatsmeow") {
+			t.Errorf("backup service mounts the WhatsApp session (%+v); it is a credential and must not be backed up", v)
+		}
+	}
+
 	// The password reaches the container only through env_file.
 	if svc.Environment["POSTGRES_PASSWORD"] != throwaway {
 		t.Errorf("POSTGRES_PASSWORD should come from the env file")

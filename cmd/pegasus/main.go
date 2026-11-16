@@ -5,6 +5,8 @@
 //	pegasus [--config file.json]              run the service
 //	pegasus healthcheck [--config f] [--addr host:port]
 //	                                          GET /readyz; exit 0 if ready, 1 if not
+//	pegasus pair [--config f]                 link WhatsApp (QR in the terminal);
+//	                                          stop the service first
 //
 // Exit codes: 0 clean shutdown, 1 runtime failure (including a forced
 // exit on a second signal), 2 configuration/usage error.
@@ -22,8 +24,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 	"github.com/marcoantonios1/Pegasus/internal/service"
 )
 
@@ -51,6 +55,9 @@ func realMain(args []string, stderr io.Writer, lookupEnv func(string) (string, b
 	if len(args) > 0 && args[0] == "healthcheck" {
 		return healthcheck(args[1:], stderr, lookupEnv)
 	}
+	if len(args) > 0 && args[0] == "pair" {
+		return pair(args[1:], os.Stdout, stderr, lookupEnv)
+	}
 
 	fs := flag.NewFlagSet("pegasus", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -59,7 +66,7 @@ func realMain(args []string, stderr io.Writer, lookupEnv func(string) (string, b
 		return exitConfig
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "pegasus: unexpected argument %q (subcommands: healthcheck)\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "pegasus: unexpected argument %q (subcommands: healthcheck, pair)\n", fs.Arg(0))
 		return exitConfig
 	}
 
@@ -118,6 +125,34 @@ func healthcheck(args []string, stderr io.Writer, lookupEnv func(string) (string
 	}
 	if err := service.Healthcheck(context.Background(), *addr); err != nil {
 		fmt.Fprintf(stderr, "pegasus healthcheck: not ready: %v\n", err)
+		return exitFail
+	}
+	return exitOK
+}
+
+// pair links the WhatsApp account interactively. The long-running service
+// never pairs; it fails fast (exit 2) pointing here instead.
+func pair(args []string, stdout, stderr io.Writer, lookupEnv func(string) (string, bool)) int {
+	fs := flag.NewFlagSet("pegasus pair", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "optional JSON config file, as for the service")
+	if err := fs.Parse(args); err != nil {
+		return exitConfig
+	}
+	cfg, err := service.LoadConfig(lookupEnv, *configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "pegasus pair: %v\n", err)
+		return exitConfig
+	}
+	fmt.Fprintln(stdout, "Make sure the pegasus service is STOPPED (`docker compose stop pegasus`): two clients on one session replace each other.")
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := wasource.Pair(ctx, cfg.WhatsAppConfig(log.Printf), stdout); err != nil {
+		fmt.Fprintf(stderr, "pegasus pair: %v\n", err)
+		if strings.Contains(err.Error(), "inside the git repository") {
+			return exitConfig
+		}
 		return exitFail
 	}
 	return exitOK

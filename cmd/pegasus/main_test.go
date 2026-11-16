@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/types"
 
+	"github.com/marcoantonios1/Pegasus/internal/ingestion/whatsapp/wasource"
 	"github.com/marcoantonios1/Pegasus/internal/service"
 )
 
@@ -290,4 +293,82 @@ func freeAddr(t *testing.T) string {
 	}
 	defer ln.Close()
 	return ln.Addr().String()
+}
+
+// TestWhatsAppEnabledButUnpaired_Exits2: the service never pairs; with
+// WhatsApp enabled and an empty session it fails fast (before touching
+// the database) with exit 2 and the pair command.
+func TestWhatsAppEnabledButUnpaired_Exits2(t *testing.T) {
+	session := filepath.Join(t.TempDir(), "wa", "session.db")
+	env := func(k string) (string, bool) {
+		switch k {
+		case "POSTGRES_PASSWORD":
+			return "unused", true
+		case "PEGASUS_WHATSAPP_ENABLED":
+			return "true", true
+		case "PEGASUS_WHATSAPP_SESSION_PATH":
+			return session, true
+		case "PEGASUS_DB_PORT":
+			return "1", true // would fail loudly if Run got as far as the DB
+		}
+		return "", false
+	}
+	var stderr strings.Builder
+	code := realMain(nil, &stderr, env, runService, func(int) {})
+	if code != exitConfig {
+		t.Fatalf("exit %d, want %d\n%s", code, exitConfig, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "docker compose run --rm pegasus pair") {
+		t.Errorf("stderr should give the pair command:\n%s", stderr.String())
+	}
+	if fi, err := os.Stat(session); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("session file mode: %v %v", fi, err)
+	}
+
+	// A session path inside the repo is refused, also with exit 2.
+	inRepo := func(k string) (string, bool) {
+		if k == "PEGASUS_WHATSAPP_SESSION_PATH" {
+			return "session.db", true
+		}
+		return env(k)
+	}
+	stderr.Reset()
+	if code := realMain(nil, &stderr, inRepo, runService, func(int) {}); code != exitConfig || !strings.Contains(stderr.String(), "inside the git repository") {
+		t.Errorf("in-repo session path: exit %d\n%s", code, stderr.String())
+	}
+	if _, err := os.Stat("session.db"); err == nil {
+		os.Remove("session.db")
+		t.Error("an in-repo session file was created")
+	}
+}
+
+// TestPair_AlreadyPaired: pair says so and exits 0 without connecting.
+func TestPair_AlreadyPaired(t *testing.T) {
+	ctx := context.Background()
+	session := filepath.Join(t.TempDir(), "session.db")
+	c, err := wasource.OpenStore(ctx, session, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := c.NewDevice()
+	id := types.NewADJID("15550009876", 0, 2)
+	dev.ID = &id
+	dev.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte("d"), AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
+	if err := dev.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+
+	env := func(k string) (string, bool) {
+		switch k {
+		case "POSTGRES_PASSWORD":
+			return "unused", true
+		case "PEGASUS_WHATSAPP_SESSION_PATH":
+			return session, true
+		}
+		return "", false
+	}
+	if code := realMain([]string{"pair"}, io.Discard, env, nil, nil); code != exitOK {
+		t.Fatalf("pair when already paired: exit %d, want 0", code)
+	}
 }

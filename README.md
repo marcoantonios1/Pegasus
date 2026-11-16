@@ -88,11 +88,12 @@ stale), they fail loudly instead of silently skipping.
 
 ## Running the service
 
-`cmd/pegasus` is the long-running Pegasus process. Today it has **no live
-message source** (the Whatsmeow client is its own issue), so it keeps the
-pipeline machinery running — config validation, schema check, restart
-recovery, the live-window flusher, the intake hook — and serves health
-endpoints. Under compose:
+`cmd/pegasus` is the long-running Pegasus process. It keeps the pipeline
+machinery running (config validation, schema check, restart recovery, the
+live-window flusher) and serves health endpoints. With
+`PEGASUS_WHATSAPP_ENABLED=true` it also ingests live WhatsApp messages (see
+"Live WhatsApp" below). The default is off, which runs it with no live
+source. Under compose:
 
 ```
 docker compose up -d --build pegasus
@@ -179,9 +180,162 @@ the import to finish, or set `PEGASUS_RECOVER_ON_START=false` for that start.
 
 Not wired yet (logged at startup): the reflection engine (no consolidation
 orchestrator yet), and live voice transcription (needs an `AudioFetcher`
-from a live source). Until a live source exists, `PEGASUS_SELF_EXTERNAL_IDS`
-being empty is harmless, but it is logged as a warning. Set it before enabling
-one, or Marco's own messages would be attributed to a contact entity.
+built on whatsmeow's `Download`). With WhatsApp enabled, the paired
+account's own JID is added to the self IDs automatically, so
+`PEGASUS_SELF_EXTERNAL_IDS` only needs other identities (if any).
+
+## Live WhatsApp
+
+The service connects as a **linked device** of Marco's WhatsApp account,
+through [whatsmeow](https://github.com/tulir/whatsmeow).
+
+**whatsmeow is an unofficial client.** WhatsApp does not support
+third-party clients, and account restrictions or bans are possible. The
+service only reads messages; it never sends any.
+
+### Pairing
+
+Pairing happens once, interactively. The long-running service never pairs.
+With WhatsApp enabled and no paired session, it exits with code 2 and tells
+you to run the pair command.
+
+1. **Stop the service.** Two clients on one session replace each other
+   (WhatsApp sends `StreamReplaced`, which the service treats as fatal):
+
+   ```
+   docker compose stop pegasus
+   ```
+
+2. Run the pair command. It prints a QR code in the terminal:
+
+   ```
+   docker compose run --rm pegasus pair
+   ```
+
+   On the phone: **Settings → Linked devices → Link a device**, then scan the
+   code. Codes refresh every few seconds. If none is scanned in time, the
+   command exits non-zero ("pairing timed out"); just run it again.
+3. After the scan, **keep WhatsApp open on the phone and let the command
+   finish.** It stays connected for 30 seconds to 3 minutes while WhatsApp
+   reconnects the new device and sends its initial sync (which is
+   acknowledged, not imported). Disconnecting earlier leaves the link
+   half-finished, and the phone logs the device out about a minute later.
+   It then prints the paired account with the number redacted to its last
+   digits (e.g. `Paired as …4567@s.whatsapp.net`) and exits 0. Running it
+   again when already paired just says so.
+4. Set `PEGASUS_WHATSAPP_ENABLED=true` in `.env` and start the service:
+
+   ```
+   docker compose up -d pegasus
+   ```
+
+On the host, without docker: `go run ./cmd/pegasus pair`. This uses
+`PEGASUS_WHATSAPP_SESSION_PATH`, default `~/.pegasus/whatsmeow/session.db`.
+
+### The session file is a credential
+
+Anyone holding the session database can read and send messages as the
+account. So:
+
+- It lives **outside the repo**. Under compose it is on the dedicated
+  `whatsmeow_session` named volume, at `/var/lib/pegasus/whatsmeow/session.db`.
+  On the host it defaults to `~/.pegasus/whatsmeow/session.db`. The service
+  refuses a path inside the git repository.
+- It is created `0600` in a `0700` directory, before SQLite opens it. The
+  `-wal`/`-shm` companions get the same mode.
+- `*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`, `*.sqlite3` and `whatsmeow*`
+  are in `.gitignore` and `.dockerignore`, and the filename hook/CI check
+  blocks committing them.
+- It is **deliberately not included in `./backups`**. The backup service only
+  dumps Postgres. Losing the session costs a re-pair, not data.
+- It uses the pure-Go SQLite driver (`modernc.org/sqlite`), so the image is
+  still built with `CGO_ENABLED=0`.
+
+**Re-pairing after a logout** (`logged_out`): the service removes the dead
+device from the session store itself, so just stop the service and run the
+pair command again. (If that removal fails, it logs so; then delete the
+session as below.)
+
+**Re-pairing voluntarily** (the device is still linked): unlink it on the
+phone (Settings → Linked devices), stop the service, delete the session
+file, then run the pair command again.
+Under compose the image has no shell, so remove the whole session volume:
+`docker compose rm -sf pegasus && docker volume rm pegasus_whatsmeow_session`
+(the volume name is prefixed with the compose project name).
+
+**Linked devices expire:** WhatsApp logs out linked devices when the phone
+stays offline for too long (about two weeks). The service then reports
+`logged_out` (see below), and you must re-pair.
+
+### What live ingestion covers
+
+Forwarded to the pipeline (`api.ProcessLiveMessage`):
+
+- **1:1 chats only**: text messages in both directions, plus images and
+  videos (stored with their caption and media reference, exactly as the
+  adapter produces them).
+- Your own messages, sent from any of your devices, are attributed to the
+  self entity.
+
+Deliberately dropped. Each drop is counted by reason in `/readyz` and the
+periodic summary:
+
+| Reason | What |
+|---|---|
+| `group` | Group chats (`@g.us`) |
+| `status_broadcast` | Status updates |
+| `broadcast_list` | Other broadcast lists |
+| `newsletter` | Channels/newsletters |
+| `unsupported_type` | Reactions, protocol/revoke messages, stickers, polls, locations, contacts, … |
+| `edit` | Message edits (applying an edit is out of scope) |
+| `voice_unsupported_live` | Voice notes. Live transcription needs a `Download`-based `AudioFetcher` (follow-up), and forwarding them now would leave permanently unprocessed rows. |
+| `history_sync` | History-sync payloads (history import is out of scope) |
+| `after_stop` | Events arriving after the source stopped |
+
+Every other non-message event is counted by type name under `other_events`.
+
+Identity: device suffixes are stripped (`123:7@s.whatsapp.net` becomes
+`123@s.whatsapp.net`). `@lid` identities are mapped to phone-number JIDs when
+the message or the session store knows the mapping. Otherwise the LID is
+kept and counted as `lid_unmapped`.
+
+Delivery: each message goes to `ProcessLiveMessage` synchronously, bounded by
+`PEGASUS_LIVE_SINK_TIMEOUT`, with up to 3 attempts. That is safe because
+ingestion is idempotent on the WhatsApp message ID. A redelivery of an
+already-stored message is counted as `duplicates`, not `forwarded`; this is
+normal shortly after linking, when whatsmeow re-requests messages it could
+not decrypt yet. There is no in-process queue, because WhatsApp has already acknowledged the message: it is durable
+once stored. A message that still fails is counted as `sink_failed` and
+logged by message ID only. Logs never contain message text, and JIDs are
+redacted to their last 4 digits. That includes whatsmeow's own log lines:
+any run of 8 or more digits (phone numbers, LIDs) is cut to its last 4.
+
+### Connection health
+
+- **Transient disconnects** never affect readiness. whatsmeow reconnects by
+  itself. If it hasn't within 30s, the service retries with capped
+  exponential backoff plus jitter (`PEGASUS_WHATSAPP_RECONNECT_BACKOFF_*`),
+  indefinitely, and warns every 10 minutes while still disconnected.
+- **Fatal states** stop all retrying and log one `ERROR` naming the state and
+  the fix. The process stays up: open windows still flush and recovery
+  completes. But `/readyz` returns `503` with the reason, so the container
+  shows unhealthy. Restart the service once fixed.
+
+  | State | Fix |
+  |---|---|
+  | `logged_out` | Re-pair (device unlinked, revoked, or phone offline too long) |
+  | `stream_replaced` | Another client is using the same session (e.g. `pair` ran while the service was up). Stop it, restart the service |
+  | `client_outdated` | Update `go.mau.fi/whatsmeow`, rebuild |
+  | `temporary_ban` | Wait for the ban to expire, restart |
+  | `connect_failure` | Authentication-type refusal; re-pair if it persists |
+
+`/readyz`'s `whatsapp` check carries the state, `connected_since`, the
+reconnect count, and the forward/drop counters (counts only, never content).
+The same summary is logged every 15 minutes and at shutdown.
+
+Note: compose's `restart: unless-stopped` means an unpaired service (exit 2)
+is restarted with Docker's growing backoff. The log says what to do; pair,
+or set `PEGASUS_WHATSAPP_ENABLED=false`.
 
 ## Configuration
 
@@ -214,6 +368,12 @@ its default, in `.env.example`.
 | `PEGASUS_LIVE_WINDOW_FLUSH_POLL_INTERVAL` | `30s` | How often the idle flusher checks. |
 | `PEGASUS_RECOVER_ON_START` | `true` | Re-extract all `processed=false` messages with text in the background at startup (see the caveat above). |
 | `PEGASUS_HTTP_ADDR` | `127.0.0.1:8095` | Health server listen address (compose: `0.0.0.0:8095` in the container, published on `127.0.0.1:8095`). |
+| `PEGASUS_LIVE_SINK_TIMEOUT` | `5m0s` | Per-message bound on `ProcessLiveMessage` for live sources. A message that times out stays `processed=false` and is recovered next start. |
+| `PEGASUS_WHATSAPP_ENABLED` | `false` | Run the live WhatsApp source. Needs a paired session (see "Live WhatsApp"); otherwise exits 2. |
+| `PEGASUS_WHATSAPP_SESSION_PATH` | `~/.pegasus/whatsmeow/session.db` | whatsmeow session database (a credential; must be outside the repo). Compose: `/var/lib/pegasus/whatsmeow/session.db` on the `whatsmeow_session` volume. |
+| `PEGASUS_WHATSAPP_RECONNECT_BACKOFF_BASE` | `2s` | First supervised-reconnect wait, doubling per attempt with ±20% jitter. |
+| `PEGASUS_WHATSAPP_RECONNECT_BACKOFF_MAX` | `5m0s` | Cap on the reconnect backoff. Retries continue indefinitely. |
+| `PEGASUS_WHATSAPP_LOG_LEVEL` | `INFO` | whatsmeow's log level (`DEBUG`, `INFO`, `WARN`, `ERROR`). Avoid `DEBUG`: it can print message payloads. |
 | `PEGASUS_SHUTDOWN_TIMEOUT` | `1m0s` | Overall graceful-shutdown bound. Must exceed the 30s final flush; compose `stop_grace_period` (90s) must exceed it. |
 
 Model names are **fixed constants** in `internal/extraction`, not settings.

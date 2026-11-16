@@ -35,6 +35,16 @@ docker-compose.override.yml
 pgdata/
 .pgdata/
 
+# WhatsApp (whatsmeow) session stores: a credential for the paired account.
+# They belong outside the repo (PEGASUS_WHATSAPP_SESSION_PATH); this is a
+# backstop. Keep in sync with scripts/hooks/check-sensitive-filenames.sh.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+whatsmeow*
+
 # Local data — exports, dumps, seeded test fixtures with real data
 /data/
 /backups/

@@ -22,6 +22,12 @@ type checkResult struct {
 	Status        string `json:"status"`
 	Detail        string `json:"detail,omitempty"`
 	Informational bool   `json:"informational,omitempty"`
+	Info          any    `json:"info,omitempty"`
+}
+
+type namedReporter struct {
+	name string
+	r    healthReporter
 }
 
 type readyResponse struct {
@@ -35,6 +41,9 @@ type healthState struct {
 	ping           func(ctx context.Context) error
 	migrationErr   error
 	probeCostguard func(ctx context.Context) error
+	// sources: live sources' own state (WhatsApp). Only a source's fatal
+	// state fails readiness; its counters are informational.
+	sources []namedReporter
 }
 
 func newHealthHandler(st *healthState) http.Handler {
@@ -88,6 +97,16 @@ func (st *healthState) ready(ctx context.Context) readyResponse {
 		resp.Checks["migrations"] = checkResult{Status: "fail", Detail: migrationDetail(st.migrationErr)}
 	} else {
 		resp.Checks["migrations"] = checkResult{Status: "ok"}
+	}
+
+	for _, src := range st.sources {
+		ready, reason, info := src.r.Health()
+		if ready {
+			resp.Checks[src.name] = checkResult{Status: "ok", Info: info}
+			continue
+		}
+		resp.Status = "not_ready"
+		resp.Checks[src.name] = checkResult{Status: "fail", Detail: reason, Info: info}
 	}
 
 	// Informational only: Costguard down never makes the service unready

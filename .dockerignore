@@ -14,3 +14,16 @@ bin
 *.log
 *.test
 .DS_Store
+# WhatsApp session stores (credentials) must never enter a build context.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/whatsmeow*
+whatsmeow*

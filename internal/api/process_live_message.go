@@ -152,6 +152,28 @@ func (a *API) resolveTextForTriage(ctx context.Context, msg *memory.Message, raw
 // used to be marked processed=true immediately, with no transcription
 // attempt at all — see the old media-type branch this replaced.
 func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessage) error {
+	_, err := a.ProcessLiveMessageResult(ctx, rawMsg)
+	return err
+}
+
+// LiveResult reports what ProcessLiveMessageResult did with a message.
+type LiveResult struct {
+	// Duplicate is true when a row with the same external_id already
+	// existed, so the call was a no-op (e.g. Whatsmeow redelivering a
+	// message after an undecryptable first attempt). Live sources use it
+	// to count redeliveries separately from newly stored messages.
+	Duplicate bool
+}
+
+// ProcessLiveMessageResult is ProcessLiveMessage, additionally reporting
+// whether the message was a duplicate. Behaviour is otherwise identical.
+func (a *API) ProcessLiveMessageResult(ctx context.Context, rawMsg ingestion.RawMessage) (LiveResult, error) {
+	var res LiveResult
+	err := a.processLiveMessage(ctx, rawMsg, &res)
+	return res, err
+}
+
+func (a *API) processLiveMessage(ctx context.Context, rawMsg ingestion.RawMessage, res *LiveResult) error {
 	if a.triager == nil || a.extractor == nil {
 		return fmt.Errorf("ProcessLiveMessage: API has no Triager/Extractor configured — call WithPipeline first")
 	}
@@ -195,6 +217,7 @@ func (a *API) ProcessLiveMessage(ctx context.Context, rawMsg ingestion.RawMessag
 		// (ImportWhatsApp, which IS resumable) would recover it. Real,
 		// narrow, and out of this issue's stated scope (see its own "out
 		// of scope" list on live/export reconciliation).
+		res.Duplicate = true
 		return nil
 	}
 
